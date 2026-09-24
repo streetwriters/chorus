@@ -218,3 +218,17 @@ func SetInProgressZeroDowntime(ctx context.Context, r entity.ReplicationSwitchIn
 	}
 	return context.WithValue(ctx, inProgressZeroDowntimeKey{}, &r)
 }
+
+type completedZeroDowntimeKey struct{}
+
+func GetCompletedZeroDowntime(ctx context.Context) *entity.ReplicationSwitchInfo {
+	r, _ := ctx.Value(completedZeroDowntimeKey{}).(*entity.ReplicationSwitchInfo)
+	return r
+}
+
+func SetCompletedZeroDowntime(ctx context.Context, r entity.ReplicationSwitchInfo) context.Context {
+	if r.MultipartTTL == 0 || r.LastStatus != entity.StatusDone {
+		panic("cannot set incomplete zero downtime switch as completed to ctx")
+	}
+	return context.WithValue(ctx, completedZeroDowntimeKey{}, &r)
+}

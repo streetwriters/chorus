@@ -22,6 +22,7 @@ import (
 	xctx "github.com/clyso/chorus/pkg/ctx"
 	"github.com/clyso/chorus/pkg/dom"
 	"github.com/clyso/chorus/pkg/entity"
+	"github.com/clyso/chorus/pkg/s3"
 	"github.com/clyso/chorus/pkg/store"
 	"github.com/clyso/chorus/pkg/validate"
 )
@@ -77,6 +78,14 @@ func (r *policySvc) BuildProxyContext(ctx context.Context, user, bucket string) 
 	}
 	if activeSwitch != nil {
 		ctx = xctx.SetInProgressZeroDowntime(ctx, *activeSwitch)
+	} else if xctx.GetMethod(ctx) == s3.DeleteObject || xctx.GetMethod(ctx) == s3.DeleteObjects {
+		completedSwitch, err := r.getCompletedZeroDowntimeSwitch(ctx, user, bucketReplID, rotuteTo, userActiveSwitchResult, bucketActiveSwitchResult)
+		if err != nil {
+			return ctx, err
+		}
+		if completedSwitch != nil {
+			ctx = xctx.SetCompletedZeroDowntime(ctx, *completedSwitch)
+		}
 	}
 
 	// set replication policies
@@ -171,6 +180,44 @@ func (r *policySvc) getActiveZeroDowntimeSwitch(ctx context.Context, userActiveR
 	return nil, nil
 }
 
+func (r *policySvc) getCompletedZeroDowntimeSwitch(ctx context.Context, user string, bucketID entity.BucketReplicationPolicyID, routedTo string, userActive, bucketActive store.OperationResult[bool]) (*entity.ReplicationSwitchInfo, error) {
+	// Bucket routing overrides user routing, so prefer a matching bucket
+	// switch before checking the user-level switch record.
+	bucketIsActive, err := bucketActive.Get()
+	if err != nil && !errors.Is(err, dom.ErrNotFound) {
+		return nil, err
+	}
+	if !bucketIsActive {
+		info, err := r.bucketReplicationSwitchStore.GetOp(ctx, bucketID).Get()
+		if err == nil && info.IsZeroDowntime() && info.LastStatus == entity.StatusDone {
+			replicationID := info.ReplicationID()
+			if replicationID.ToStorage() == routedTo {
+				return &info, nil
+			}
+		}
+		if err != nil && !errors.Is(err, dom.ErrNotFound) {
+			return nil, err
+		}
+	}
+	userIsActive, err := userActive.Get()
+	if err != nil && !errors.Is(err, dom.ErrNotFound) {
+		return nil, err
+	}
+	if !userIsActive {
+		info, err := r.userReplicationSwitchStore.GetOp(ctx, user).Get()
+		if err == nil && info.IsZeroDowntime() && info.LastStatus == entity.StatusDone {
+			replicationID := info.ReplicationID()
+			if replicationID.ToStorage() == routedTo {
+				return &info, nil
+			}
+		}
+		if err != nil && !errors.Is(err, dom.ErrNotFound) {
+			return nil, err
+		}
+	}
+	return nil, nil
+}
+
 func getReplications(bucketPolicies store.OperationResult[[]entity.BucketReplicationPolicy], userPolicies store.OperationResult[[]entity.UserReplicationPolicy]) ([]entity.UniversalReplicationID, error) {
 	bucketRepls, err := bucketPolicies.Get()
 	if err != nil && !errors.Is(err, dom.ErrNotFound) {
@@ -228,6 +275,14 @@ func (r *policySvc) BuildProxyNoBucketContext(ctx context.Context, user string) 
 	}
 	if activeSwitch != nil {
 		ctx = xctx.SetInProgressZeroDowntime(ctx, *activeSwitch)
+	} else if xctx.GetMethod(ctx) == s3.DeleteObject || xctx.GetMethod(ctx) == s3.DeleteObjects {
+		completedSwitch, err := r.getCompletedZeroDowntimeSwitch(ctx, user, entity.BucketReplicationPolicyID{User: user}, rotuteTo, userActiveSwitchResult, bucketActiveSwitchResult)
+		if err != nil {
+			return ctx, err
+		}
+		if completedSwitch != nil {
+			ctx = xctx.SetCompletedZeroDowntime(ctx, *completedSwitch)
+		}
 	}
 
 	// set replication policies

@@ -152,5 +152,8 @@ func StartNew(from context.Context) (context.Context, context.CancelFunc) {
 	if switchInfo := xctx.GetInProgressZeroDowntime(from); switchInfo != nil {
 		ctx = xctx.SetInProgressZeroDowntime(ctx, *switchInfo)
 	}
+	if switchInfo := xctx.GetCompletedZeroDowntime(from); switchInfo != nil {
+		ctx = xctx.SetCompletedZeroDowntime(ctx, *switchInfo)
+	}
 	return ctx, cancel
 }

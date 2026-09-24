@@ -57,6 +57,43 @@ func (s *s3Svc) Replicate(ctx context.Context, routedTo string, task tasks.Repli
 	}
 	zerolog.Ctx(ctx).Debug().Msg("creating replication task")
 
+	// A zero-downtime switch archives A->B as soon as B becomes active. Keep
+	// delete intent in the normal durable task queue in the reverse direction,
+	// while recording the delete version on B in the original switch vector.
+	if objectTask, ok := task.(*tasks.ObjectSyncPayload); ok && objectTask.Deleted {
+		switchInfo := xctx.GetInProgressZeroDowntime(ctx)
+		if switchInfo == nil {
+			switchInfo = xctx.GetCompletedZeroDowntime(ctx)
+		}
+		if switchInfo != nil {
+			originalID := switchInfo.ReplicationID()
+			if routedTo == originalID.ToStorage() {
+				destination := meta.Destination{Storage: routedTo, Bucket: xctx.GetBucket(ctx)}
+				if _, err := s.versionSvc.IncrementObj(ctx, originalID, objectTask.Object, destination); err != nil {
+					return err
+				}
+				reverseTask := *objectTask
+				reverseID := originalID.Swap()
+				reverseTask.SetReplicationID(reverseID)
+				hasReversePolicy := false
+				for _, replID := range xctx.GetReplications(ctx) {
+					if replID.AsString() == reverseID.AsString() {
+						hasReversePolicy = true
+						break
+					}
+				}
+				if !hasReversePolicy {
+					if err := s.queueSvc.EnqueueTask(ctx, &reverseTask); err != nil {
+						return err
+					}
+				}
+				if len(xctx.GetReplications(ctx)) == 0 {
+					return nil
+				}
+			}
+		}
+	}
+
 	// 1. find repl rule(-s)
 	replications, skipTasks, err := s.getDestinations(ctx, routedTo)
 	if err != nil {

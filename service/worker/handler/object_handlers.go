@@ -67,9 +67,14 @@ func (s *svc) HandleObjectSync(ctx context.Context, t *asynq.Task) (err error) {
 	if err != nil {
 		return err
 	}
-	isObjDeleted := versions.IsEmpty()
-	if isObjDeleted {
+	if p.Deleted {
 		return s.objectDelete(ctx, p)
+	}
+	if versions.IsEmpty() {
+		// Absence of version metadata is not proof of a delete. Older or
+		// partially repaired events must never erase a destination object.
+		logger.Warn().Msg("object sync: skip event without version or delete intent")
+		return nil
 	}
 
 	fromVer, toVer := versions.From, versions.To
@@ -107,16 +112,10 @@ func (s *svc) HandleObjectSync(ctx context.Context, t *asynq.Task) (err error) {
 }
 
 func (s *svc) objectDelete(ctx context.Context, p tasks.ObjectSyncPayload) (err error) {
-	fromClient, toClient, err := s.getClients(ctx, p.ID.User(), p.ID.FromStorage(), p.ID.ToStorage())
+	_, toClient, err := s.getClients(ctx, p.ID.User(), p.ID.FromStorage(), p.ID.ToStorage())
 	if err != nil {
 		return err
 	}
-	_, err = fromClient.S3().StatObject(ctx, p.Object.Bucket, p.Object.Name, mclient.StatObjectOptions{})
-	if err == nil {
-		zerolog.Ctx(ctx).Warn().Msg("skip obj delete: obj still exists in source storage")
-		return nil
-	}
-
 	_, toBucket := p.ID.FromToBuckets(p.Object.Bucket)
 	err = toClient.S3().RemoveObject(ctx, toBucket, p.Object.Name, mclient.RemoveObjectOptions{VersionID: p.Object.Version})
 	return
