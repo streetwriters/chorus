@@ -216,7 +216,7 @@ func (r *policySvc) AddUserReplicationPolicy(ctx context.Context, policy entity.
 	case err == nil:
 		oldReplicationID := userSwitch.ReplicationID()
 		oldPolicy, ok := oldReplicationID.AsUserID()
-		if userSwitch.LastStatus != entity.StatusPromotedWithBacklog || !ok || oldPolicy.ToStorage != policy.FromStorage {
+		if !canReplicateFromSwitchTarget(userSwitch.LastStatus) || !ok || oldPolicy.ToStorage != policy.FromStorage {
 			return fmt.Errorf("%w: cannot have multiple user replications when user replication switch exists: %s", dom.ErrInvalidArg, userSwitch.ReplicationIDStr)
 		}
 	case errors.Is(err, dom.ErrNotFound):
@@ -325,7 +325,7 @@ func (r *policySvc) AddBucketReplicationPolicy(ctx context.Context, policy entit
 	case err == nil:
 		oldReplicationID := userSwitch.ReplicationID()
 		oldPolicy, ok := oldReplicationID.AsBucketID()
-		if userSwitch.LastStatus != entity.StatusPromotedWithBacklog || !ok || oldPolicy.ToStorage != policy.FromStorage || oldPolicy.ToBucket != policy.FromBucket {
+		if !canReplicateFromSwitchTarget(userSwitch.LastStatus) || !ok || oldPolicy.ToStorage != policy.FromStorage || oldPolicy.ToBucket != policy.FromBucket {
 			return fmt.Errorf("%w: cannot have multiple bucket replications when bucket replication switch exists: %s", dom.ErrInvalidArg, userSwitch.ReplicationIDStr)
 		}
 	case errors.Is(err, dom.ErrNotFound):
@@ -361,6 +361,10 @@ func (r *policySvc) AddBucketReplicationPolicy(ctx context.Context, policy entit
 		return fmt.Errorf("unable to execute transaction: %w", err)
 	}
 	return nil
+}
+
+func canReplicateFromSwitchTarget(status entity.ReplicationSwitchStatus) bool {
+	return status == entity.StatusPromotedWithBacklog || status == entity.StatusDone
 }
 
 func (r *policySvc) DeleteBucketReplication(ctx context.Context, policy entity.BucketReplicationPolicy) error {

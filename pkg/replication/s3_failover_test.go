@@ -55,6 +55,29 @@ func TestDeleteDuringZeroDowntimeSwitchQueuesDurableReverseIntent(t *testing.T) 
 	r.Equal("user:b:a:bucket:bucket", replicationID.AsString())
 }
 
+func TestPutDuringZeroDowntimeSwitchQueuesReverseEvent(t *testing.T) {
+	r := require.New(t)
+	queue := &taskRecorder{}
+	versions := meta.NewVersionService(testutil.SetupRedis(t))
+	original := entity.UniversalFromBucketReplication(entity.BucketReplicationPolicy{
+		User: "user", FromStorage: "a", FromBucket: "bucket", ToStorage: "b", ToBucket: "bucket",
+	})
+	activeSwitch := entity.ReplicationSwitchInfo{
+		LastStatus:                        entity.StatusInProgress,
+		ReplicationSwitchZeroDowntimeOpts: entity.ReplicationSwitchZeroDowntimeOpts{MultipartTTL: time.Minute},
+	}
+	activeSwitch.SetReplicationID(original)
+	ctx := xctx.SetInProgressZeroDowntime(context.Background(), activeSwitch)
+	ctx = xctx.SetBucket(ctx, "bucket")
+	object := dom.Object{Bucket: "bucket", Name: "written-during-switch"}
+	r.NoError(NewS3(queue, versions, nil).Replicate(ctx, "b", &tasks.ObjectSyncPayload{Object: object}))
+	r.Len(queue.tasks, 1)
+	r.Equal("user:b:a:bucket:bucket", queue.tasks[0].(*tasks.ObjectSyncPayload).GetReplicationID().AsString())
+	oldVector, err := versions.GetObj(ctx, original, object)
+	r.NoError(err)
+	r.Equal(1, oldVector.To, "delayed A→B events must not overwrite this B write")
+}
+
 func TestDeleteAfterCompletedSwitchQueuesReverseIntent(t *testing.T) {
 	r := require.New(t)
 	queue := &taskRecorder{}
@@ -78,6 +101,28 @@ func TestDeleteAfterCompletedSwitchQueuesReverseIntent(t *testing.T) {
 	r.True(deleteTask.Deleted)
 	replicationID := deleteTask.GetReplicationID()
 	r.Equal("user:b:a:bucket:bucket", replicationID.AsString())
+}
+
+func TestPutBetweenDoneSwitchAndRecoveryPolicyQueuesReverseEvent(t *testing.T) {
+	r := require.New(t)
+	queue := &taskRecorder{}
+	versions := meta.NewVersionService(testutil.SetupRedis(t))
+	original := entity.UniversalFromBucketReplication(entity.BucketReplicationPolicy{
+		User: "user", FromStorage: "a", FromBucket: "bucket", ToStorage: "b", ToBucket: "bucket",
+	})
+	completedSwitch := entity.ReplicationSwitchInfo{
+		LastStatus:                        entity.StatusDone,
+		ReplicationSwitchZeroDowntimeOpts: entity.ReplicationSwitchZeroDowntimeOpts{MultipartTTL: time.Minute},
+	}
+	completedSwitch.SetReplicationID(original)
+	ctx := xctx.SetCompletedZeroDowntime(context.Background(), completedSwitch)
+	ctx = xctx.SetBucket(ctx, "bucket")
+	object := dom.Object{Bucket: "bucket", Name: "written-during-recovery-handoff"}
+	r.NoError(NewS3(queue, versions, nil).Replicate(ctx, "b", &tasks.ObjectSyncPayload{Object: object}))
+	r.Len(queue.tasks, 1)
+	repair := queue.tasks[0].(*tasks.ObjectSyncPayload)
+	r.False(repair.Deleted)
+	r.Equal("user:b:a:bucket:bucket", repair.GetReplicationID().AsString())
 }
 
 func TestDeleteAfterSwitchKeepsCurrentReplicationAndOldReplicaIntent(t *testing.T) {

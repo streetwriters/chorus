@@ -57,76 +57,15 @@ func (s *s3Svc) Replicate(ctx context.Context, routedTo string, task tasks.Repli
 	}
 	zerolog.Ctx(ctx).Debug().Msg("creating replication task")
 
-	// A zero-downtime switch archives A->B as soon as B becomes active. Keep
-	// delete intent in the normal durable task queue in the reverse direction,
-	// while recording the delete version on B in the original switch vector.
-	if objectTask, ok := task.(*tasks.ObjectSyncPayload); ok && objectTask.Deleted {
+	if objectTask, ok := task.(*tasks.ObjectSyncPayload); ok {
 		switchInfo := xctx.GetInProgressZeroDowntime(ctx)
 		if switchInfo == nil {
 			switchInfo = xctx.GetCompletedZeroDowntime(ctx)
 		}
-		if switchInfo != nil && switchInfo.LastStatus != entity.StatusPromotedWithBacklog {
-			originalID := switchInfo.ReplicationID()
-			if routedTo == originalID.ToStorage() {
-				destination := meta.Destination{Storage: routedTo, Bucket: xctx.GetBucket(ctx)}
-				if _, err := s.versionSvc.IncrementObj(ctx, originalID, objectTask.Object, destination); err != nil {
-					return err
-				}
-				reverseTask := *objectTask
-				reverseID := originalID.Swap()
-				reverseTask.SetReplicationID(reverseID)
-				hasReversePolicy := false
-				for _, replID := range xctx.GetReplications(ctx) {
-					if replID.AsString() == reverseID.AsString() {
-						hasReversePolicy = true
-						break
-					}
-				}
-				if !hasReversePolicy {
-					if err := s.queueSvc.EnqueueTask(ctx, &reverseTask); err != nil {
-						return err
-					}
-				}
-				if len(xctx.GetReplications(ctx)) == 0 {
-					return nil
-				}
-			}
-		}
-	}
-
-	// A promoted switch can stop blocking new replication relationships while
-	// its original A->B repair event remains queued. Keep B's version current in
-	// that old vector so a late repair cannot overwrite newer B data.
-	if objectTask, ok := task.(*tasks.ObjectSyncPayload); ok {
-		backlogSwitch := xctx.GetInProgressZeroDowntime(ctx)
-		if backlogSwitch != nil && backlogSwitch.LastStatus == entity.StatusPromotedWithBacklog {
-			originalID := backlogSwitch.ReplicationID()
-			if routedTo == originalID.ToStorage() {
-				destination := meta.Destination{Storage: routedTo, Bucket: objectTask.Object.Bucket}
-				if _, err := s.versionSvc.IncrementObj(ctx, originalID, objectTask.Object, destination); err != nil {
-					return err
-				}
-				if objectTask.Deleted {
-					reverseTask := *objectTask
-					reverseID := originalID.Swap()
-					reverseTask.SetReplicationID(reverseID)
-					hasReversePolicy := false
-					for _, replID := range xctx.GetReplications(ctx) {
-						if replID.AsString() == reverseID.AsString() {
-							hasReversePolicy = true
-							break
-						}
-					}
-					if !hasReversePolicy {
-						if err := s.queueSvc.EnqueueTask(ctx, &reverseTask); err != nil {
-							return err
-						}
-					}
-				}
-				if len(xctx.GetReplications(ctx)) == 0 {
-					return nil
-				}
-			}
+		if handled, err := s.recordSwitchedObjectMutation(ctx, routedTo, objectTask, switchInfo); err != nil {
+			return err
+		} else if handled {
+			return nil
 		}
 	}
 
@@ -208,6 +147,47 @@ func (s *s3Svc) Replicate(ctx context.Context, routedTo string, task tasks.Repli
 	}
 
 	return nil
+}
+
+// recordSwitchedObjectMutation keeps the old A->B vector current after B is
+// active and durably mirrors mutations to A until a reverse policy exists.
+// Capturing writes during an in-progress switch also closes the race where a
+// request built before completion reaches B after recovery replication starts.
+func (s *s3Svc) recordSwitchedObjectMutation(ctx context.Context, routedTo string, task *tasks.ObjectSyncPayload, switchInfo *entity.ReplicationSwitchInfo) (bool, error) {
+	if switchInfo == nil {
+		return false, nil
+	}
+	originalID := switchInfo.ReplicationID()
+	if routedTo != originalID.ToStorage() {
+		return false, nil
+	}
+	needsReverseIntent := switchInfo.LastStatus == entity.StatusInProgress || switchInfo.LastStatus == entity.StatusPromotedWithBacklog || switchInfo.LastStatus == entity.StatusDone
+	if !needsReverseIntent {
+		return false, nil
+	}
+	destination := meta.Destination{Storage: routedTo, Bucket: task.Object.Bucket}
+	if _, err := s.versionSvc.IncrementObj(ctx, originalID, task.Object, destination); err != nil {
+		return false, err
+	}
+	reverseID := originalID.Swap()
+	hasReversePolicy := false
+	for _, replID := range xctx.GetReplications(ctx) {
+		if replID.AsString() == reverseID.AsString() {
+			hasReversePolicy = true
+			break
+		}
+	}
+	if !hasReversePolicy {
+		if _, err := s.versionSvc.IncrementObj(ctx, reverseID, task.Object, destination); err != nil {
+			return false, err
+		}
+		reverseTask := *task
+		reverseTask.SetReplicationID(reverseID)
+		if err := s.queueSvc.EnqueueTask(ctx, &reverseTask); err != nil {
+			return false, err
+		}
+	}
+	return len(xctx.GetReplications(ctx)) == 0, nil
 }
 
 // getDestinations returns replication targets for the current request.

@@ -80,3 +80,63 @@ func TestUserReplicationCanContinueFromPromotedTargetWhileOldBacklogRemains(t *t
 	currentID := currentReplications[0]
 	r.Equal("user:b:c", currentID.AsString())
 }
+
+func TestDoneSwitchAllowsRecoveryReplicationWithoutDeletingSwitch(t *testing.T) {
+	r := require.New(t)
+	ctx := t.Context()
+	svc := NewService(testutil.SetupRedis(t), nil, "a")
+	oldPolicy := entity.BucketReplicationPolicy{User: "user", FromStorage: "a", FromBucket: "bucket", ToStorage: "b", ToBucket: "bucket"}
+	oldID := entity.UniversalFromBucketReplication(oldPolicy)
+	switchInfo := entity.ReplicationSwitchInfo{
+		LastStatus:                        entity.StatusInProgress,
+		ReplicationSwitchZeroDowntimeOpts: entity.ReplicationSwitchZeroDowntimeOpts{MultipartTTL: time.Minute},
+	}
+	r.NoError(svc.bucketReplicationSwitchStore.Create(ctx, oldPolicy, switchInfo))
+	r.NoError(svc.bucketReplicationSwitchStore.UpdateStatusOp(ctx, oldPolicy, entity.StatusInProgress, entity.StatusDone, "complete").Get())
+	r.NoError(svc.bucketRoutingStore.SetOp(ctx, entity.NewBucketRoutingPolicyID("user", "bucket"), "b").Get())
+
+	// A mutation routed before recovery setup still receives the completed
+	// switch context so Replicate can persist its reverse event.
+	requestCtx := xctx.SetMethod(context.Background(), s3.PutObject)
+	requestCtx, err := svc.BuildProxyContext(requestCtx, "user", "bucket")
+	r.NoError(err)
+	completed := xctx.GetCompletedZeroDowntime(requestCtx)
+	r.NotNil(completed)
+	r.Equal(oldID.AsString(), completed.ReplicationID().AsString())
+
+	recovery := entity.BucketReplicationPolicy{User: "user", FromStorage: "b", FromBucket: "bucket", ToStorage: "a", ToBucket: "bucket"}
+	r.NoError(svc.AddBucketReplicationPolicy(ctx, recovery, entity.ReplicationOptions{}))
+	info, err := svc.GetReplicationSwitchInfo(ctx, oldID)
+	r.NoError(err)
+	r.Equal(entity.StatusDone, info.LastStatus, "recovery setup keeps the old switch record until replication protection exists")
+
+	requestCtx = xctx.SetMethod(context.Background(), s3.PutObject)
+	requestCtx, err = svc.BuildProxyContext(requestCtx, "user", "bucket")
+	r.NoError(err)
+	replications := xctx.GetReplications(requestCtx)
+	r.Len(replications, 1)
+	r.Equal("user:b:a:bucket:bucket", replications[0].AsString())
+	completed = xctx.GetCompletedZeroDowntime(requestCtx)
+	r.NotNil(completed)
+}
+
+func TestDoneSwitchAllowsAddingAnotherFollower(t *testing.T) {
+	r := require.New(t)
+	ctx := t.Context()
+	svc := NewService(testutil.SetupRedis(t), nil, "a")
+	oldPolicy := entity.UserReplicationPolicy{User: "user", FromStorage: "a", ToStorage: "b"}
+	oldID := entity.UniversalFromUserReplication(oldPolicy)
+	switchInfo := entity.ReplicationSwitchInfo{
+		LastStatus:                        entity.StatusInProgress,
+		ReplicationSwitchZeroDowntimeOpts: entity.ReplicationSwitchZeroDowntimeOpts{MultipartTTL: time.Minute},
+	}
+	r.NoError(svc.userReplicationSwitchStore.Create(ctx, oldPolicy, switchInfo))
+	r.NoError(svc.userReplicationSwitchStore.UpdateStatusOp(ctx, oldPolicy, entity.StatusInProgress, entity.StatusDone, "complete").Get())
+	r.NoError(svc.userRoutingStore.SetOp(ctx, "user", "b").Get())
+
+	newPolicy := entity.UserReplicationPolicy{User: "user", FromStorage: "b", ToStorage: "c"}
+	r.NoError(svc.AddUserReplicationPolicy(ctx, newPolicy, entity.ReplicationOptions{}))
+	info, err := svc.GetReplicationSwitchInfo(ctx, oldID)
+	r.NoError(err)
+	r.Equal(entity.StatusDone, info.LastStatus)
+}

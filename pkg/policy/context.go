@@ -85,7 +85,7 @@ func (r *policySvc) BuildProxyContext(ctx context.Context, user, bucket string) 
 		}
 		if backlogSwitch != nil {
 			ctx = xctx.SetInProgressZeroDowntime(ctx, *backlogSwitch)
-		} else if xctx.GetMethod(ctx) == s3.DeleteObject || xctx.GetMethod(ctx) == s3.DeleteObjects {
+		} else if isObjectMutationMethod(xctx.GetMethod(ctx)) {
 			completedSwitch, err := r.getCompletedZeroDowntimeSwitch(ctx, user, bucketReplID, rotuteTo, userActiveSwitchResult, bucketActiveSwitchResult)
 			if err != nil {
 				return ctx, err
@@ -106,6 +106,15 @@ func (r *policySvc) BuildProxyContext(ctx context.Context, user, bucket string) 
 	}
 
 	return ctx, nil
+}
+
+func isObjectMutationMethod(method s3.Method) bool {
+	switch method {
+	case s3.PutObject, s3.DeleteObject, s3.DeleteObjects, s3.CopyObject, s3.CompleteMultipartUpload:
+		return true
+	default:
+		return false
+	}
 }
 
 func determineActiveRouting(mainStorage string, userRouting, bucketRouting store.OperationResult[string]) (string, error) {
@@ -316,7 +325,7 @@ func (r *policySvc) BuildProxyNoBucketContext(ctx context.Context, user string) 
 		}
 		if backlogSwitch != nil {
 			ctx = xctx.SetInProgressZeroDowntime(ctx, *backlogSwitch)
-		} else if xctx.GetMethod(ctx) == s3.DeleteObject || xctx.GetMethod(ctx) == s3.DeleteObjects {
+		} else if isObjectMutationMethod(xctx.GetMethod(ctx)) {
 			completedSwitch, err := r.getCompletedZeroDowntimeSwitch(ctx, user, entity.BucketReplicationPolicyID{User: user}, rotuteTo, userActiveSwitchResult, bucketActiveSwitchResult)
 			if err != nil {
 				return ctx, err
