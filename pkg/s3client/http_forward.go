@@ -107,15 +107,6 @@ func (c *client) Do(req *http.Request) (resp *http.Response, isApiErr bool, err 
 
 	_, doReqSpan := otel.Tracer("").Start(ctx, fmt.Sprintf("clientDo.%s.DoReq", xctx.GetMethod(req.Context()).String()))
 	resp, err = c.c.Do(newReq)
-	if err != nil {
-		if mclient.IsNetworkOrHostDown(err, false) {
-			c.health.Store(healthOffline)
-		}
-	} else {
-		if resp != nil {
-			c.health.Store(healthOnline)
-		}
-	}
 	doReqSpan.End()
 	if resp != nil && !successStatus[resp.StatusCode] {
 		isApiErr = true

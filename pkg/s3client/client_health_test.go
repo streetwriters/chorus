@@ -16,7 +16,7 @@ func (canceledRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
 	return nil, context.Canceled
 }
 
-func TestCanceledRequestDoesNotMarkProviderOffline(t *testing.T) {
+func TestCanceledForwardRequestReturnsCancellation(t *testing.T) {
 	provider := &client{
 		c:           &http.Client{Transport: canceledRoundTripper{}},
 		conf:        s3.StorageAddress{Address: "http://storage.example"},
@@ -25,11 +25,9 @@ func TestCanceledRequestDoesNotMarkProviderOffline(t *testing.T) {
 		storageName: "main",
 		userName:    "user",
 	}
-	provider.health.Store(healthOnline)
 	request, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://proxy.example/bucket/object", nil)
 	require.NoError(t, err)
 
 	_, _, err = provider.Do(request)
 	require.ErrorIs(t, err, context.Canceled)
-	require.True(t, provider.IsOnline())
 }

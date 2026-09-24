@@ -20,8 +20,6 @@ import (
 	"context"
 	"net/http"
 	"strings"
-	"sync/atomic"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	aws_credentials "github.com/aws/aws-sdk-go-v2/credentials"
@@ -40,23 +38,10 @@ type Client interface {
 	Do(req *http.Request) (*http.Response, bool, error)
 }
 
-// HealthReporter is optionally implemented by S3 clients that expose the
-// provider connectivity state without expanding the main Client contract.
-type HealthReporter interface {
-	IsOnline() bool
-	HealthKnown() bool
-}
-
-// HealthChecker probes the configured provider and refreshes its connectivity state.
+// HealthChecker probes the configured provider when availability is needed.
 type HealthChecker interface {
 	Probe(context.Context) error
 }
-
-const (
-	healthUnknown int32 = iota
-	healthOffline
-	healthOnline
-)
 
 type client struct {
 	metricsSvc  metrics.Service
@@ -68,10 +53,9 @@ type client struct {
 	storageName string
 	userName    string
 	conf        s3.StorageAddress
-	health      atomic.Int32
 }
 
-func NewClient(ctx context.Context, metricsSvc metrics.Service, storageConf s3.StorageAddress, cred s3.CredentialsV4, storageName, userName string) (Client, error) {
+func NewClient(_ context.Context, metricsSvc metrics.Service, storageConf s3.StorageAddress, cred s3.CredentialsV4, storageName, userName string) (Client, error) {
 	c := &client{
 		c: &http.Client{
 			Timeout: storageConf.HttpTimeout,
@@ -117,35 +101,10 @@ func NewClient(ctx context.Context, metricsSvc metrics.Service, storageConf s3.S
 			return aws.Endpoint{URL: snsEndpoint}, nil
 		}),
 	})
-	// Provider availability is a runtime condition. Keep the client registered
-	// so routing and management can start while a provider is offline.
-	go func() {
-		probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		defer cancel()
-		state := healthOffline
-		if isOnline(probeCtx, c) == nil {
-			state = healthOnline
-		}
-		c.health.CompareAndSwap(healthUnknown, state)
-	}()
-
 	return c, nil
 }
 
-// IsOnline reports the result of the most recent startup connectivity probe.
-func (c *client) IsOnline() bool { return c.health.Load() == healthOnline }
-
-func (c *client) HealthKnown() bool { return c.health.Load() != healthUnknown }
-
-func (c *client) Probe(ctx context.Context) error {
-	err := isOnline(ctx, c)
-	if err != nil {
-		c.health.Store(healthOffline)
-		return err
-	}
-	c.health.Store(healthOnline)
-	return nil
-}
+func (c *client) Probe(ctx context.Context) error { return isOnline(ctx, c) }
 
 func isOnline(ctx context.Context, c *client) error {
 	_, err := c.mc.GetBucketLocation(ctx, "probe-health-test")
