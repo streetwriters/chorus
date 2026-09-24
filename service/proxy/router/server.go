@@ -21,6 +21,7 @@ import (
 	"io"
 	"net/http"
 
+	mclient "github.com/minio/minio-go/v7"
 	"github.com/rs/zerolog"
 	"go.opentelemetry.io/otel"
 
@@ -28,6 +29,7 @@ import (
 	"github.com/clyso/chorus/pkg/log"
 	"github.com/clyso/chorus/pkg/objstore"
 	"github.com/clyso/chorus/pkg/replication"
+	"github.com/clyso/chorus/pkg/tasks"
 	"github.com/clyso/chorus/pkg/util"
 )
 
@@ -146,6 +148,15 @@ func serve(router Router, replSvc replication.Service) http.Handler {
 				replErr := replSvc.Replicate(replCtx, storage, task)
 				if replErr != nil {
 					logger.Err(replErr).Msg("unable to handle replication")
+					if isObjectSyncTask(task) {
+						w.Header().Set("Retry-After", "1")
+						util.WriteError(ctx, w, mclient.ErrorResponse{
+							Code:       "ServiceUnavailable",
+							Message:    "The write succeeded on the active provider but its replication event could not be stored. Retry the request.",
+							StatusCode: http.StatusServiceUnavailable,
+						})
+						return
+					}
 				}
 			}
 		}
@@ -161,4 +172,13 @@ func serve(router Router, replSvc replication.Service) http.Handler {
 			return
 		}
 	})
+}
+
+func isObjectSyncTask(task tasks.ReplicationTask) bool {
+	switch task.(type) {
+	case *tasks.ObjectSyncPayload:
+		return true
+	default:
+		return false
+	}
 }

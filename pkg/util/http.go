@@ -78,6 +78,16 @@ func WriteError(ctx context.Context, w http.ResponseWriter, err error) {
 			Key:        xctx.GetObject(ctx),
 			StatusCode: http.StatusInternalServerError,
 		}
+	case mclient.IsNetworkOrHostDown(err, false):
+		logLevel = zerolog.WarnLevel
+		w.Header().Set("Retry-After", "1")
+		s3Err = mclient.ErrorResponse{
+			Code:       "ServiceUnavailable",
+			Message:    "The requested storage provider is temporarily unavailable.",
+			BucketName: xctx.GetBucket(ctx),
+			Key:        xctx.GetObject(ctx),
+			StatusCode: http.StatusServiceUnavailable,
+		}
 	default:
 		s3Err = mclient.ErrorResponse{
 			XMLName:    xml.Name{},

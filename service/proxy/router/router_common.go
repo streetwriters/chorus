@@ -18,7 +18,6 @@ package router
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 
 	"github.com/rs/zerolog"
@@ -71,14 +70,15 @@ func (r *s3Router) adjustObjReadRoute(ctx context.Context, prevStorage string) (
 		// no zero-downtime switch in progress
 		return prevStorage, nil
 	}
+	if inProgressZeroDowntime.LastStatus != entity.StatusInProgress {
+		return prevStorage, nil
+	}
 	// since switch is in progress, we need to check if the object version is higher in other storage
 
-	// zero-downtime switch allowed only for a single replication:
-	replications := xctx.GetReplications(ctx)
-	if len(replications) != 1 {
-		return "", fmt.Errorf("%w: in-progress zero-downtime switch can have only one replication", dom.ErrInternal)
-	}
-	replID := replications[0]
+	// The source policy is archived while its zero-downtime switch is active,
+	// so the context may have no replication policies at all. The switch record
+	// itself is the authoritative replication identity for per-object routing.
+	replID := inProgressZeroDowntime.ReplicationID()
 	version, err := r.getVersion(ctx, replID)
 	if err != nil {
 		return "", err

@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -66,6 +67,12 @@ func (e encoder[T]) Encode(ctx context.Context, payload T) (*asynq.Task, error) 
 		return nil, err
 	}
 	optionList := []asynq.Option{asynq.Queue(queue), asynq.Timeout(taskTimeout)}
+	if _, ok := any(payload).(ObjectSyncPayload); ok {
+		// Object events carry recoverable data or delete state. Keep retrying
+		// through long provider outages instead of archiving them after the
+		// generic task retry limit.
+		optionList = append(optionList, asynq.MaxRetry(math.MaxInt32))
+	}
 	if e.taskID != nil {
 		id := e.taskID(payload)
 		if id == "" {
