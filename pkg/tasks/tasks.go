@@ -165,13 +165,11 @@ type BucketCreatePayload struct {
 type ObjectSyncPayload struct {
 	replicationID
 	Object dom.Object
-	// UploadID identifies a multipart completion that is awaiting durable
-	// replication enqueue. It is cleared from Redis once this event is stored.
-	UploadID string `json:",omitempty"`
-
-	//FromVersion int64
-	ObjSize int64
-	Deleted bool
+	// FromVersion identifies the source mutation represented by this event.
+	// Zero is reserved for legacy tasks that predate mutation versions.
+	FromVersion int64 `json:",omitempty"`
+	ObjSize     int64
+	Deleted     bool
 }
 
 type BucketDeletePayload struct {

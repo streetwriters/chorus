@@ -113,15 +113,22 @@ func (s *s3Svc) Replicate(ctx context.Context, routedTo string, task tasks.Repli
 				return err
 			}
 		case *tasks.ObjectSyncPayload:
-			// During zero-downtime switch use Increment even for deletes
-			// to keep version non-empty so old events see From <= To and skip.
-			if t.Deleted && !skipTasks {
-				err = s.versionSvc.DeleteObjAll(ctx, replID, t.Object)
-			} else {
-				_, err = s.versionSvc.IncrementObj(ctx, replID, t.Object, destination)
-			}
+			// Deletes are versioned mutations too. Keeping their source version
+			// lets the worker reject a delayed delete after a newer source write.
+			var version int
+			version, err = s.versionSvc.IncrementObj(ctx, replID, t.Object, destination)
 			if err != nil {
 				return err
+			}
+			if !skipTasks {
+				objectTask := *t
+				objectTask.FromVersion = int64(version)
+				objectTask.SetReplicationID(replID)
+				err = s.queueSvc.EnqueueTask(ctx, &objectTask)
+				if err != nil {
+					return fmt.Errorf("unable to fan out replication task to %+v: %w", replID, err)
+				}
+				continue
 			}
 		case *tasks.ObjSyncACLPayload:
 			_, err = s.versionSvc.IncrementACL(ctx, replID, t.Object, destination)
@@ -178,10 +185,12 @@ func (s *s3Svc) recordSwitchedObjectMutation(ctx context.Context, routedTo strin
 		}
 	}
 	if !hasReversePolicy {
-		if _, err := s.versionSvc.IncrementObj(ctx, reverseID, task.Object, destination); err != nil {
+		version, err := s.versionSvc.IncrementObj(ctx, reverseID, task.Object, destination)
+		if err != nil {
 			return false, err
 		}
 		reverseTask := *task
+		reverseTask.FromVersion = int64(version)
 		reverseTask.SetReplicationID(reverseID)
 		if err := s.queueSvc.EnqueueTask(ctx, &reverseTask); err != nil {
 			return false, err

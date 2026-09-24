@@ -69,12 +69,19 @@ func (s *svc) HandleObjectSync(ctx context.Context, t *asynq.Task) (err error) {
 	}
 	if p.Deleted {
 		// Explicit delete intent remains authoritative when no version exists,
-		// but a delayed source delete must not erase a newer target mutation.
-		if !shouldApplyDeleteVersion(versions) {
-			logger.Info().Int("from_ver", versions.From).Int("to_ver", versions.To).Msg("object delete: skip stale source delete")
+		// but a delayed source delete must identify and still match its version.
+		if !shouldApplyDeleteVersion(p.FromVersion, versions) {
+			logger.Info().Int64("task_from_ver", p.FromVersion).Int("from_ver", versions.From).Int("to_ver", versions.To).Msg("object delete: skip stale source delete")
 			return nil
 		}
-		return s.objectDelete(ctx, p)
+		if err := s.objectDelete(ctx, p); err != nil {
+			return err
+		}
+		if p.FromVersion > 0 {
+			destination := meta.Destination{Storage: p.ID.ToStorage(), Bucket: toBucket}
+			return s.versionSvc.UpdateIfGreater(ctx, p.ID, p.Object, destination, int(p.FromVersion))
+		}
+		return nil
 	}
 	if versions.IsEmpty() {
 		// Absence of version metadata is not proof of a delete. Older or
@@ -84,6 +91,10 @@ func (s *svc) HandleObjectSync(ctx context.Context, t *asynq.Task) (err error) {
 	}
 
 	fromVer, toVer := versions.From, versions.To
+	if p.FromVersion > 0 && int(p.FromVersion) != fromVer {
+		logger.Info().Int64("task_from_ver", p.FromVersion).Int("from_ver", fromVer).Msg("object sync: skip stale source event")
+		return nil
+	}
 	if fromVer <= toVer {
 		logger.Info().Int("from_ver", fromVer).Int("to_ver", toVer).Msg("object sync: identical from/to obj version: skip copy")
 		return nil
@@ -117,10 +128,13 @@ func (s *svc) HandleObjectSync(ctx context.Context, t *asynq.Task) (err error) {
 	return nil
 }
 
-func shouldApplyDeleteVersion(versions meta.Version) bool {
-	// Empty version state does not invent a delete; p.Deleted already carries
-	// explicit durable intent. Known state does allow us to reject stale tasks.
-	return versions.IsEmpty() || versions.From > versions.To
+func shouldApplyDeleteVersion(taskVersion int64, versions meta.Version) bool {
+	if taskVersion == 0 {
+		// Legacy delete tasks carry no ordering identity. Only apply when no
+		// newer state is known; otherwise preserve the object conservatively.
+		return versions.IsEmpty()
+	}
+	return taskVersion == int64(versions.From) && versions.From > versions.To
 }
 
 func (s *svc) objectDelete(ctx context.Context, p tasks.ObjectSyncPayload) (err error) {

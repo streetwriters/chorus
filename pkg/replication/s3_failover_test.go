@@ -51,6 +51,7 @@ func TestDeleteDuringZeroDowntimeSwitchQueuesDurableReverseIntent(t *testing.T) 
 	deleteTask, ok := queue.tasks[0].(*tasks.ObjectSyncPayload)
 	r.True(ok)
 	r.True(deleteTask.Deleted)
+	r.Equal(int64(1), deleteTask.FromVersion)
 	replicationID := deleteTask.GetReplicationID()
 	r.Equal("user:b:a:bucket:bucket", replicationID.AsString())
 }
@@ -100,6 +101,7 @@ func TestDeleteAfterCompletedSwitchQueuesReverseIntent(t *testing.T) {
 	r.Len(queue.tasks, 1)
 	deleteTask := queue.tasks[0].(*tasks.ObjectSyncPayload)
 	r.True(deleteTask.Deleted)
+	r.Equal(int64(1), deleteTask.FromVersion)
 	replicationID := deleteTask.GetReplicationID()
 	r.Equal("user:b:a:bucket:bucket", replicationID.AsString())
 }
@@ -123,6 +125,7 @@ func TestPutBetweenDoneSwitchAndRecoveryPolicyQueuesReverseEvent(t *testing.T) {
 	r.Len(queue.tasks, 1)
 	repair := queue.tasks[0].(*tasks.ObjectSyncPayload)
 	r.False(repair.Deleted)
+	r.Equal(int64(1), repair.FromVersion)
 	queuedID := repair.GetReplicationID()
 	r.Equal("user:b:a:bucket:bucket", queuedID.AsString())
 }
