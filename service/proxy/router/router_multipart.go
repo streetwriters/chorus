@@ -90,9 +90,9 @@ func (r *s3Router) completeMultipartUpload(req *http.Request) (resp *http.Respon
 	resp, isApiErr, err = client.Do(req)
 	var reconciledObject *mclient.ObjectInfo
 	// CompleteMultipartUpload is not idempotent at S3: after a successful
-	// completion, a retry with the same upload ID returns NoSuchUpload. During
-	// a switch, keep the upload marker until its object event is queued and use
-	// HEAD to reconcile that retry with the committed object.
+	// completion, a retry with the same upload ID returns NoSuchUpload. Keep the
+	// upload marker until its object event is queued and use HEAD to reconcile
+	// that retry with the committed object.
 	if isApiErr && err != nil && trackedUpload != nil && mclient.ToErrorResponse(err).Code == "NoSuchUpload" {
 		if info, statErr := client.S3().StatObject(ctx, bucket, object, mclient.StatObjectOptions{}); statErr == nil &&
 			(trackedUpload.StartedAt.IsZero() || !info.LastModified.Add(time.Second).Before(trackedUpload.StartedAt)) {
