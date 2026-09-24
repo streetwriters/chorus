@@ -160,12 +160,6 @@ func (r *s3Router) completeMultipartUpload(req *http.Request) (resp *http.Respon
 				}
 				return ""
 			}(),
-			UploadStorage: func() string {
-				if trackedUpload != nil {
-					return trackedUpload.Storage
-				}
-				return ""
-			}(),
 		},
 		&tasks.ObjSyncACLPayload{
 			Object: obj,
