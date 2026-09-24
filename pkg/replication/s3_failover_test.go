@@ -72,7 +72,8 @@ func TestPutDuringZeroDowntimeSwitchQueuesReverseEvent(t *testing.T) {
 	object := dom.Object{Bucket: "bucket", Name: "written-during-switch"}
 	r.NoError(NewS3(queue, versions, nil).Replicate(ctx, "b", &tasks.ObjectSyncPayload{Object: object}))
 	r.Len(queue.tasks, 1)
-	r.Equal("user:b:a:bucket:bucket", queue.tasks[0].(*tasks.ObjectSyncPayload).GetReplicationID().AsString())
+	queuedID := queue.tasks[0].(*tasks.ObjectSyncPayload).GetReplicationID()
+	r.Equal("user:b:a:bucket:bucket", queuedID.AsString())
 	oldVector, err := versions.GetObj(ctx, original, object)
 	r.NoError(err)
 	r.Equal(1, oldVector.To, "delayed A→B events must not overwrite this B write")
@@ -122,7 +123,8 @@ func TestPutBetweenDoneSwitchAndRecoveryPolicyQueuesReverseEvent(t *testing.T) {
 	r.Len(queue.tasks, 1)
 	repair := queue.tasks[0].(*tasks.ObjectSyncPayload)
 	r.False(repair.Deleted)
-	r.Equal("user:b:a:bucket:bucket", repair.GetReplicationID().AsString())
+	queuedID := repair.GetReplicationID()
+	r.Equal("user:b:a:bucket:bucket", queuedID.AsString())
 }
 
 func TestDeleteAfterSwitchKeepsCurrentReplicationAndOldReplicaIntent(t *testing.T) {
@@ -209,8 +211,12 @@ func TestWriteAfterPromotionAdvancesOldVectorAndReplicatesToNewTarget(t *testing
 	oldVector, err := versions.GetObj(t.Context(), original, object)
 	r.NoError(err)
 	r.Equal(1, oldVector.To, "a late A->B event must see that B has newer data and skip its overwrite")
-	r.Len(queue.tasks, 1, "the promoted B->C relationship must receive new writes")
-	queuedTask := queue.tasks[0].(*tasks.ObjectSyncPayload)
-	queuedID := queuedTask.GetReplicationID()
-	r.Equal(current.AsString(), queuedID.AsString())
+	r.Len(queue.tasks, 2, "the old A repair and promoted B->C relationship must both receive the write")
+	queuedIDs := make([]string, 0, len(queue.tasks))
+	for _, queued := range queue.tasks {
+		queuedID := queued.(*tasks.ObjectSyncPayload).GetReplicationID()
+		queuedIDs = append(queuedIDs, queuedID.AsString())
+	}
+	reverse := original.Swap()
+	r.ElementsMatch([]string{reverse.AsString(), current.AsString()}, queuedIDs)
 }

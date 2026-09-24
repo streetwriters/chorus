@@ -102,7 +102,8 @@ func TestDoneSwitchAllowsRecoveryReplicationWithoutDeletingSwitch(t *testing.T) 
 	r.NoError(err)
 	completed := xctx.GetCompletedZeroDowntime(requestCtx)
 	r.NotNil(completed)
-	r.Equal(oldID.AsString(), completed.ReplicationID().AsString())
+	completedID := completed.ReplicationID()
+	r.Equal(oldID.AsString(), completedID.AsString())
 
 	recovery := entity.BucketReplicationPolicy{User: "user", FromStorage: "b", FromBucket: "bucket", ToStorage: "a", ToBucket: "bucket"}
 	r.NoError(svc.AddBucketReplicationPolicy(ctx, recovery, entity.ReplicationOptions{}))
