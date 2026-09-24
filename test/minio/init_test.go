@@ -119,6 +119,9 @@ func setup(m *testing.M) int {
 		panic(fmt.Sprintf("unable to get worker config: %v", err))
 	}
 	workerConf.Log.Level = "warn"
+	// Let SetupChorus choose a free management HTTP port. The configured
+	// default collides with a developer's locally running HA lab.
+	workerConf.Api.HttpPort = 0
 	workerConf.Storage = app.WorkerS3Config(minioKey, storages)
 
 	proxyConf, err = proxy.GetConfig()
