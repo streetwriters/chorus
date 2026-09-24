@@ -153,3 +153,20 @@ func Test_StoreUploadID(t *testing.T) {
 	r.NoError(err)
 	r.False(exists)
 }
+
+func TestGetUploadReturnsOriginAndTreatsMissingAsAbsent(t *testing.T) {
+	r := require.New(t)
+	svc := NewUploadSvc(testutil.SetupRedis(t))
+	ctx := t.Context()
+	id := entity.NewUserUploadObjectID("u1", "b1")
+
+	missing, err := svc.GetUpload(ctx, id, "object", "missing")
+	r.NoError(err)
+	r.Nil(missing)
+
+	want := entity.NewUserUploadObject("object", "upload-1", "storage-a")
+	r.NoError(svc.StoreUpload(ctx, id, want, time.Hour))
+	got, err := svc.GetUpload(ctx, id, "object", "upload-1")
+	r.NoError(err)
+	r.Equal(&want, got)
+}

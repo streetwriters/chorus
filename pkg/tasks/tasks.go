@@ -165,6 +165,10 @@ type BucketCreatePayload struct {
 type ObjectSyncPayload struct {
 	replicationID
 	Object dom.Object
+	// UploadID identifies a multipart completion that is awaiting durable
+	// replication enqueue. It is cleared from Redis once this event is stored.
+	UploadID      string `json:",omitempty"`
+	UploadStorage string `json:",omitempty"`
 
 	//FromVersion int64
 	ObjSize int64

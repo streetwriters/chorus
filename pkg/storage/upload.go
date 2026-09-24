@@ -16,6 +16,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -48,8 +49,29 @@ func (r *UploadSvc) StoreUpload(ctx context.Context, id entity.UserUploadObjectI
 	if _, err := r.store.Add(ctx, id, object); err != nil {
 		return fmt.Errorf("unable to add user upload object: %w", err)
 	}
-	_, _ = r.store.SetTTL(ctx, id, ttl)
+	if ttl > 0 {
+		_, _ = r.store.SetTTL(ctx, id, ttl)
+	}
 	return nil
+}
+
+func (r *UploadSvc) GetUpload(ctx context.Context, id entity.UserUploadObjectID, object, uploadID string) (*entity.UserUploadObject, error) {
+	if err := validate.UserUploadObjectID(id); err != nil {
+		return nil, fmt.Errorf("unable to validate user upload object id: %w", err)
+	}
+	values, err := r.store.Get(ctx, id)
+	if errors.Is(err, dom.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("unable to list user uploads: %w", err)
+	}
+	for _, value := range values {
+		if value.Object == object && value.UploadID == uploadID {
+			return &value, nil
+		}
+	}
+	return nil, nil
 }
 
 func (r *UploadSvc) UploadExists(ctx context.Context, id entity.UserUploadObjectID,

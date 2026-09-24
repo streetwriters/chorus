@@ -14,6 +14,8 @@
 
 package entity
 
+import "time"
+
 type UserUploadObjectID struct {
 	User   string
 	Bucket string
@@ -27,13 +29,19 @@ func NewUserUploadObjectID(user string, bucket string) UserUploadObjectID {
 }
 
 type UserUploadObject struct {
-	Object   string
-	UploadID string
+	Object    string
+	UploadID  string
+	Storage   string    `json:",omitempty"`
+	StartedAt time.Time `json:",omitempty"`
 }
 
-func NewUserUploadObject(object string, uploadID string) UserUploadObject {
-	return UserUploadObject{
+func NewUserUploadObject(object string, uploadID string, storage ...string) UserUploadObject {
+	res := UserUploadObject{
 		Object:   object,
 		UploadID: uploadID,
 	}
+	if len(storage) > 0 {
+		res.Storage = storage[0]
+	}
+	return res
 }
