@@ -171,6 +171,8 @@ func toPbSwitchWithDowntimeStatus(in entity.ReplicationSwitchStatus) pb.Replicat
 		return pb.ReplicationSwitch_ERROR
 	case entity.StatusDone:
 		return pb.ReplicationSwitch_DONE
+	case entity.StatusPromotedWithBacklog:
+		return pb.ReplicationSwitch_PROMOTED_WITH_BACKLOG
 	default:
 		return pb.ReplicationSwitch_NOT_STARTED
 	}

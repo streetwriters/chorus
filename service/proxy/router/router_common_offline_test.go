@@ -72,3 +72,25 @@ func TestAdjustObjReadRouteKeepsReplicatedObjectOnActiveTarget(t *testing.T) {
 	r.NoError(err)
 	r.Equal("b", got)
 }
+
+func TestAdjustObjReadRouteKeepsPromotedSourceOnlyObjectUnavailable(t *testing.T) {
+	r := require.New(t)
+	versions := meta.NewVersionService(testutil.SetupRedis(t))
+	switchID := entity.UniversalFromBucketReplication(entity.BucketReplicationPolicy{
+		User: "user", FromStorage: "a", FromBucket: "bucket", ToStorage: "b", ToBucket: "bucket",
+	})
+	object := dom.Object{Bucket: "bucket", Name: "source-only"}
+	_, err := versions.IncrementObj(t.Context(), switchID, object, meta.Destination{Storage: "a", Bucket: "bucket"})
+	r.NoError(err)
+	switchInfo := entity.ReplicationSwitchInfo{
+		LastStatus:                        entity.StatusPromotedWithBacklog,
+		ReplicationSwitchZeroDowntimeOpts: entity.ReplicationSwitchZeroDowntimeOpts{MultipartTTL: time.Minute},
+	}
+	switchInfo.SetReplicationID(switchID)
+	ctx := xctx.SetInProgressZeroDowntime(context.Background(), switchInfo)
+	ctx = xctx.SetBucket(ctx, "bucket")
+	ctx = xctx.SetObject(ctx, object.Name)
+	routedTo, err := (&s3Router{versionSvc: versions}).adjustObjReadRoute(ctx, "b")
+	r.NoError(err)
+	r.Equal("a", routedTo, "a missing object must continue to fail against the unavailable source, not poison the bucket")
+}

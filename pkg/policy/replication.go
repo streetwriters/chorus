@@ -214,7 +214,11 @@ func (r *policySvc) AddUserReplicationPolicy(ctx context.Context, policy entity.
 	userSwitch, err := r.userReplicationSwitchStore.Get(ctx, policy.User)
 	switch {
 	case err == nil:
-		return fmt.Errorf("%w: cannot have multiple user replications when user replication switch exists: %s", dom.ErrInvalidArg, userSwitch.ReplicationIDStr)
+		oldReplicationID := userSwitch.ReplicationID()
+		oldPolicy, ok := oldReplicationID.AsUserID()
+		if userSwitch.LastStatus != entity.StatusPromotedWithBacklog || !ok || oldPolicy.ToStorage != policy.FromStorage {
+			return fmt.Errorf("%w: cannot have multiple user replications when user replication switch exists: %s", dom.ErrInvalidArg, userSwitch.ReplicationIDStr)
+		}
 	case errors.Is(err, dom.ErrNotFound):
 		// not found, good
 		break
@@ -319,7 +323,11 @@ func (r *policySvc) AddBucketReplicationPolicy(ctx context.Context, policy entit
 	userSwitch, err := r.bucketReplicationSwitchStore.Get(ctx, policy.LookupID())
 	switch {
 	case err == nil:
-		return fmt.Errorf("%w: cannot have multiple bucket replications when bucket replication switch exists: %s", dom.ErrInvalidArg, userSwitch.ReplicationIDStr)
+		oldReplicationID := userSwitch.ReplicationID()
+		oldPolicy, ok := oldReplicationID.AsBucketID()
+		if userSwitch.LastStatus != entity.StatusPromotedWithBacklog || !ok || oldPolicy.ToStorage != policy.FromStorage || oldPolicy.ToBucket != policy.FromBucket {
+			return fmt.Errorf("%w: cannot have multiple bucket replications when bucket replication switch exists: %s", dom.ErrInvalidArg, userSwitch.ReplicationIDStr)
+		}
 	case errors.Is(err, dom.ErrNotFound):
 		// not found, good
 		break

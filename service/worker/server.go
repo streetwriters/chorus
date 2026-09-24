@@ -184,7 +184,7 @@ func Start(ctx context.Context, app dom.AppInfo, conf *Config) error {
 		mux.Use(metrics.WorkerMiddleware())
 	}
 	// common workers
-	switchWorker := handler.NewSwitchSvc(conf.Worker, policySvc, uploadSvc, replicationStatusLocker)
+	switchWorker := handler.NewSwitchSvc(conf.Worker, policySvc, clientRegistry, uploadSvc, replicationStatusLocker)
 	mux.HandleFunc(tasks.TypeApiZeroDowntimeSwitch, switchWorker.HandleZeroDowntimeReplicationSwitch)
 	mux.HandleFunc(tasks.TypeApiSwitchWithDowntime, switchWorker.HandleSwitchWithDowntime)
 	logger.Info().Msg("registered common workers")

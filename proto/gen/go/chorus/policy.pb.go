@@ -104,6 +104,10 @@ const (
 	// All data was replicated to replication destination target and all read
 	// and all requests are now routed to it.
 	ReplicationSwitch_DONE ReplicationSwitch_Status = 5
+	// Routing is promoted to the destination, but source-dependent repair
+	// events remain queued. Writes can continue and another replication
+	// relationship can be configured; the switch completes after repair drains.
+	ReplicationSwitch_PROMOTED_WITH_BACKLOG ReplicationSwitch_Status = 6
 )
 
 // Enum value maps for ReplicationSwitch_Status.
@@ -115,14 +119,16 @@ var (
 		3: "ERROR",
 		4: "SKIPPED",
 		5: "DONE",
+		6: "PROMOTED_WITH_BACKLOG",
 	}
 	ReplicationSwitch_Status_value = map[string]int32{
-		"NOT_STARTED":       0,
-		"IN_PROGRESS":       1,
-		"CHECK_IN_PROGRESS": 2,
-		"ERROR":             3,
-		"SKIPPED":           4,
-		"DONE":              5,
+		"NOT_STARTED":           0,
+		"IN_PROGRESS":           1,
+		"CHECK_IN_PROGRESS":     2,
+		"ERROR":                 3,
+		"SKIPPED":               4,
+		"DONE":                  5,
+		"PROMOTED_WITH_BACKLOG": 6,
 	}
 )
 
@@ -2088,7 +2094,7 @@ const file_chorus_policy_proto_rawDesc = "" +
 	"\x05_cronB\v\n" +
 	"\t_start_atB\x0f\n" +
 	"\r_max_durationB\x10\n" +
-	"\x0e_max_event_lag\"\x8a\x05\n" +
+	"\x0e_max_event_lag\"\xa5\x05\n" +
 	"\x11ReplicationSwitch\x12A\n" +
 	"\vlast_status\x18\x01 \x01(\x0e2 .chorus.ReplicationSwitch.StatusR\n" +
 	"lastStatus\x12#\n" +
@@ -2098,14 +2104,15 @@ const file_chorus_policy_proto_rawDesc = "" +
 	"\x0flast_started_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampH\x02R\rlastStartedAt\x88\x01\x01\x128\n" +
 	"\adone_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampH\x03R\x06doneAt\x88\x01\x01\x12\x18\n" +
 	"\ahistory\x18\a \x03(\tR\ahistory\x12<\n" +
-	"\x0ereplication_id\x18\b \x01(\v2\x15.chorus.ReplicationIDR\rreplicationId\"c\n" +
+	"\x0ereplication_id\x18\b \x01(\v2\x15.chorus.ReplicationIDR\rreplicationId\"~\n" +
 	"\x06Status\x12\x0f\n" +
 	"\vNOT_STARTED\x10\x00\x12\x0f\n" +
 	"\vIN_PROGRESS\x10\x01\x12\x15\n" +
 	"\x11CHECK_IN_PROGRESS\x10\x02\x12\t\n" +
 	"\x05ERROR\x10\x03\x12\v\n" +
 	"\aSKIPPED\x10\x04\x12\b\n" +
-	"\x04DONE\x10\x05B\x10\n" +
+	"\x04DONE\x10\x05\x12\x19\n" +
+	"\x15PROMOTED_WITH_BACKLOG\x10\x06B\x10\n" +
 	"\x0e_multipart_ttlB\x10\n" +
 	"\x0e_downtime_optsB\x12\n" +
 	"\x10_last_started_atB\n" +

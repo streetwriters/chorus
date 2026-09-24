@@ -36,6 +36,8 @@ type ReplicationSwitchSvc interface {
 	AddZeroDowntimeReplicationSwitch(ctx context.Context, replID entity.UniversalReplicationID, opts *entity.ReplicationSwitchZeroDowntimeOpts) error
 	// Completes zero downtime replication switch.
 	CompleteZeroDowntimeReplicationSwitch(ctx context.Context, replID entity.UniversalReplicationID) error
+	// Promotes routing when the source is unreachable while leaving repair events queued.
+	PromoteZeroDowntimeReplicationSwitch(ctx context.Context, replID entity.UniversalReplicationID) error
 	// Deletes any replication switch if exists and reverts routing policy if switch was not done.
 	DeleteReplicationSwitch(ctx context.Context, replID entity.UniversalReplicationID) error
 	// Returns replication switch config and status information.
@@ -353,13 +355,29 @@ func (r *policySvc) CompleteZeroDowntimeReplicationSwitch(ctx context.Context, r
 	if !info.IsZeroDowntime() {
 		return fmt.Errorf("%w: cannot complete zero downtime switch: switch is not zero downtime", dom.ErrInvalidArg)
 	}
-	if info.LastStatus != entity.StatusInProgress {
+	if info.LastStatus != entity.StatusInProgress && info.LastStatus != entity.StatusPromotedWithBacklog {
 		return fmt.Errorf("%w: cannot complete zero downtime switch: switch is not in progress", dom.ErrInvalidArg)
 	}
 	tx := r.bucketReplicationSwitchStore.TxExecutor()
 	r.updateSwitchStatusInTx(ctx, tx, replID, info.LastStatus, entity.StatusDone, "complete zero downtime switch")
 	if err := tx.Exec(ctx); err != nil {
 		return fmt.Errorf("unable to update zero downtime switch status: %w", err)
+	}
+	return nil
+}
+
+func (r *policySvc) PromoteZeroDowntimeReplicationSwitch(ctx context.Context, replID entity.UniversalReplicationID) error {
+	info, err := r.GetReplicationSwitchInfo(ctx, replID)
+	if err != nil {
+		return err
+	}
+	if !info.IsZeroDowntime() || info.LastStatus != entity.StatusInProgress {
+		return fmt.Errorf("%w: cannot promote zero downtime switch with backlog from status %q", dom.ErrInvalidArg, info.LastStatus)
+	}
+	tx := r.bucketReplicationSwitchStore.TxExecutor()
+	r.updateSwitchStatusInTx(ctx, tx, replID, info.LastStatus, entity.StatusPromotedWithBacklog, "promote routing; source repair backlog remains queued")
+	if err := tx.Exec(ctx); err != nil {
+		return fmt.Errorf("unable to promote zero downtime switch with backlog: %w", err)
 	}
 	return nil
 }

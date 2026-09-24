@@ -70,7 +70,7 @@ func (r *s3Router) adjustObjReadRoute(ctx context.Context, prevStorage string) (
 		// no zero-downtime switch in progress
 		return prevStorage, nil
 	}
-	if inProgressZeroDowntime.LastStatus != entity.StatusInProgress {
+	if inProgressZeroDowntime.LastStatus != entity.StatusInProgress && inProgressZeroDowntime.LastStatus != entity.StatusPromotedWithBacklog {
 		return prevStorage, nil
 	}
 	// since switch is in progress, we need to check if the object version is higher in other storage

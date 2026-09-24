@@ -28,7 +28,9 @@ import (
 
 	"github.com/clyso/chorus/pkg/dom"
 	"github.com/clyso/chorus/pkg/entity"
+	"github.com/clyso/chorus/pkg/objstore"
 	"github.com/clyso/chorus/pkg/policy"
+	"github.com/clyso/chorus/pkg/s3client"
 	"github.com/clyso/chorus/pkg/storage"
 	"github.com/clyso/chorus/pkg/store"
 	"github.com/clyso/chorus/pkg/tasks"
@@ -41,16 +43,18 @@ var (
 
 type switchSvc struct {
 	policySvc               policy.Service
+	clients                 objstore.Clients
 	uploadSvc               *storage.UploadSvc
 	replicationstatusLocker *store.ReplicationStatusLocker
 	conf                    *Config
 }
 
-func NewSwitchSvc(conf *Config, policySvc policy.Service, uploadSvc *storage.UploadSvc,
+func NewSwitchSvc(conf *Config, policySvc policy.Service, clients objstore.Clients, uploadSvc *storage.UploadSvc,
 	replicationstatusLocker *store.ReplicationStatusLocker) *switchSvc {
 	return &switchSvc{
 		conf:                    conf,
 		policySvc:               policySvc,
+		clients:                 clients,
 		uploadSvc:               uploadSvc,
 		replicationstatusLocker: replicationstatusLocker,
 	}
@@ -356,7 +360,20 @@ func (s *switchSvc) handleZeroDowntimeReplicationSwitch(ctx context.Context, p t
 	done := replStatus.InitDone() && replStatus.EventMigration.Unprocessed == 0
 	// check if replication switch can be finished:
 	if !done {
-		// events queue is not drained yet - retry later
+		if switchPolicy.LastStatus == entity.StatusInProgress && s.clients != nil {
+			sourceOnline, err := s.sourceOnline(ctx, replicationID)
+			if err != nil {
+				return err
+			}
+			if !sourceOnline {
+				if err := s.policySvc.PromoteZeroDowntimeReplicationSwitch(ctx, replicationID); err != nil {
+					return err
+				}
+				zerolog.Ctx(ctx).Warn().Str("source", replicationID.FromStorage()).Msg("promoted routing with repair backlog while source is unavailable")
+			}
+		}
+		// Keep the repair event and switch task durable; when the source returns,
+		// the old event can drain and the switch can reach Done.
 		return &dom.ErrRateLimitExceeded{RetryIn: s.conf.SwitchRetryInterval}
 	}
 	var existsMultipartUploads bool
@@ -375,4 +392,23 @@ func (s *switchSvc) handleZeroDowntimeReplicationSwitch(ctx context.Context, p t
 	// all good - finish zero downtime replication switch:
 
 	return s.policySvc.CompleteZeroDowntimeReplicationSwitch(ctx, replicationID)
+}
+
+func (s *switchSvc) sourceOnline(ctx context.Context, id entity.UniversalReplicationID) (bool, error) {
+	client, err := s.clients.AsS3(ctx, id.FromStorage(), id.User())
+	if err != nil {
+		return false, err
+	}
+	checker, ok := client.(s3client.HealthChecker)
+	if !ok {
+		return true, nil
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	err = checker.Probe(probeCtx)
+	if err != nil {
+		zerolog.Ctx(ctx).Warn().Err(err).Str("source", id.FromStorage()).Msg("source provider health probe failed")
+		return false, nil
+	}
+	return true, nil
 }

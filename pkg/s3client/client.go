@@ -47,6 +47,11 @@ type HealthReporter interface {
 	HealthKnown() bool
 }
 
+// HealthChecker probes the configured provider and refreshes its connectivity state.
+type HealthChecker interface {
+	Probe(context.Context) error
+}
+
 const (
 	healthUnknown int32 = iota
 	healthOffline
@@ -131,6 +136,16 @@ func NewClient(ctx context.Context, metricsSvc metrics.Service, storageConf s3.S
 func (c *client) IsOnline() bool { return c.health.Load() == healthOnline }
 
 func (c *client) HealthKnown() bool { return c.health.Load() != healthUnknown }
+
+func (c *client) Probe(ctx context.Context) error {
+	err := isOnline(ctx, c)
+	if err != nil {
+		c.health.Store(healthOffline)
+		return err
+	}
+	c.health.Store(healthOnline)
+	return nil
+}
 
 func isOnline(ctx context.Context, c *client) error {
 	_, err := c.mc.GetBucketLocation(ctx, "probe-health-test")

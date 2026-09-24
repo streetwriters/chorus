@@ -49,3 +49,26 @@ func TestCompletedSwitchIdentitySurvivesProxyRestartForDeletePropagation(t *test
 	var replicationID = completed.ReplicationID()
 	r.Equal("user:a:b", replicationID.AsString())
 }
+
+func TestPromotedSwitchBacklogRemainsAvailableForProxyReadsAndWrites(t *testing.T) {
+	r := require.New(t)
+	redis := testutil.SetupRedis(t)
+	beforeRestart := NewService(redis, nil, "a")
+	policyID := entity.UserReplicationPolicy{User: "user", FromStorage: "a", ToStorage: "b"}
+	switchInfo := entity.ReplicationSwitchInfo{
+		LastStatus:                        entity.StatusInProgress,
+		ReplicationSwitchZeroDowntimeOpts: entity.ReplicationSwitchZeroDowntimeOpts{MultipartTTL: time.Minute},
+	}
+	r.NoError(beforeRestart.userReplicationSwitchStore.Create(t.Context(), policyID, switchInfo))
+	r.NoError(beforeRestart.userReplicationSwitchStore.UpdateStatusOp(t.Context(), policyID, entity.StatusInProgress, entity.StatusPromotedWithBacklog, "source unavailable; preserve repair backlog").Get())
+	r.NoError(beforeRestart.userRoutingStore.SetOp(t.Context(), "user", "b").Get())
+
+	baseCtx := xctx.SetMethod(context.Background(), s3.GetObject)
+	requestCtx, err := NewService(redis, nil, "a").BuildProxyNoBucketContext(baseCtx, "user")
+	r.NoError(err)
+	backlog := xctx.GetInProgressZeroDowntime(requestCtx)
+	r.NotNil(backlog, "promoted switch identity must remain available for per-object routing")
+	r.Equal(entity.StatusPromotedWithBacklog, backlog.LastStatus)
+	backlogID := backlog.ReplicationID()
+	r.Equal("user:a:b", backlogID.AsString())
+}

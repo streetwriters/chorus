@@ -40,6 +40,9 @@ const (
 	StatusCheckInProgress ReplicationSwitchStatus = "check_in_progress"
 	// StatusDone means that switch is successfully finished and data is routed to new bucket.
 	StatusDone ReplicationSwitchStatus = "done"
+	// StatusPromotedWithBacklog means routing is promoted, but one or more
+	// source-dependent events remain queued for repair when the source returns.
+	StatusPromotedWithBacklog ReplicationSwitchStatus = "promoted_with_backlog"
 	// StatusError means that switch was aborted due to error
 	// Relevant only for downtime switches
 	StatusError ReplicationSwitchStatus = "error"

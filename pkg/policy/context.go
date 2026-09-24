@@ -78,13 +78,21 @@ func (r *policySvc) BuildProxyContext(ctx context.Context, user, bucket string) 
 	}
 	if activeSwitch != nil {
 		ctx = xctx.SetInProgressZeroDowntime(ctx, *activeSwitch)
-	} else if xctx.GetMethod(ctx) == s3.DeleteObject || xctx.GetMethod(ctx) == s3.DeleteObjects {
-		completedSwitch, err := r.getCompletedZeroDowntimeSwitch(ctx, user, bucketReplID, rotuteTo, userActiveSwitchResult, bucketActiveSwitchResult)
+	} else {
+		backlogSwitch, err := r.getPromotedZeroDowntimeSwitch(ctx, user, bucketReplID, rotuteTo)
 		if err != nil {
 			return ctx, err
 		}
-		if completedSwitch != nil {
-			ctx = xctx.SetCompletedZeroDowntime(ctx, *completedSwitch)
+		if backlogSwitch != nil {
+			ctx = xctx.SetInProgressZeroDowntime(ctx, *backlogSwitch)
+		} else if xctx.GetMethod(ctx) == s3.DeleteObject || xctx.GetMethod(ctx) == s3.DeleteObjects {
+			completedSwitch, err := r.getCompletedZeroDowntimeSwitch(ctx, user, bucketReplID, rotuteTo, userActiveSwitchResult, bucketActiveSwitchResult)
+			if err != nil {
+				return ctx, err
+			}
+			if completedSwitch != nil {
+				ctx = xctx.SetCompletedZeroDowntime(ctx, *completedSwitch)
+			}
 		}
 	}
 
@@ -218,6 +226,32 @@ func (r *policySvc) getCompletedZeroDowntimeSwitch(ctx context.Context, user str
 	return nil, nil
 }
 
+func (r *policySvc) getPromotedZeroDowntimeSwitch(ctx context.Context, user string, bucketID entity.BucketReplicationPolicyID, routedTo string) (*entity.ReplicationSwitchInfo, error) {
+	if bucketID.FromBucket != "" {
+		info, err := r.bucketReplicationSwitchStore.GetOp(ctx, bucketID).Get()
+		if err == nil && info.IsZeroDowntime() && info.LastStatus == entity.StatusPromotedWithBacklog {
+			replicationID := info.ReplicationID()
+			if replicationID.ToStorage() == routedTo {
+				return &info, nil
+			}
+		}
+		if err != nil && !errors.Is(err, dom.ErrNotFound) {
+			return nil, err
+		}
+	}
+	info, err := r.userReplicationSwitchStore.GetOp(ctx, user).Get()
+	if err == nil && info.IsZeroDowntime() && info.LastStatus == entity.StatusPromotedWithBacklog {
+		replicationID := info.ReplicationID()
+		if replicationID.ToStorage() == routedTo {
+			return &info, nil
+		}
+	}
+	if err != nil && !errors.Is(err, dom.ErrNotFound) {
+		return nil, err
+	}
+	return nil, nil
+}
+
 func getReplications(bucketPolicies store.OperationResult[[]entity.BucketReplicationPolicy], userPolicies store.OperationResult[[]entity.UserReplicationPolicy]) ([]entity.UniversalReplicationID, error) {
 	bucketRepls, err := bucketPolicies.Get()
 	if err != nil && !errors.Is(err, dom.ErrNotFound) {
@@ -275,13 +309,21 @@ func (r *policySvc) BuildProxyNoBucketContext(ctx context.Context, user string) 
 	}
 	if activeSwitch != nil {
 		ctx = xctx.SetInProgressZeroDowntime(ctx, *activeSwitch)
-	} else if xctx.GetMethod(ctx) == s3.DeleteObject || xctx.GetMethod(ctx) == s3.DeleteObjects {
-		completedSwitch, err := r.getCompletedZeroDowntimeSwitch(ctx, user, entity.BucketReplicationPolicyID{User: user}, rotuteTo, userActiveSwitchResult, bucketActiveSwitchResult)
+	} else {
+		backlogSwitch, err := r.getPromotedZeroDowntimeSwitch(ctx, user, entity.BucketReplicationPolicyID{User: user}, rotuteTo)
 		if err != nil {
 			return ctx, err
 		}
-		if completedSwitch != nil {
-			ctx = xctx.SetCompletedZeroDowntime(ctx, *completedSwitch)
+		if backlogSwitch != nil {
+			ctx = xctx.SetInProgressZeroDowntime(ctx, *backlogSwitch)
+		} else if xctx.GetMethod(ctx) == s3.DeleteObject || xctx.GetMethod(ctx) == s3.DeleteObjects {
+			completedSwitch, err := r.getCompletedZeroDowntimeSwitch(ctx, user, entity.BucketReplicationPolicyID{User: user}, rotuteTo, userActiveSwitchResult, bucketActiveSwitchResult)
+			if err != nil {
+				return ctx, err
+			}
+			if completedSwitch != nil {
+				ctx = xctx.SetCompletedZeroDowntime(ctx, *completedSwitch)
+			}
 		}
 	}
 

@@ -138,3 +138,34 @@ func TestDeleteDoesNotDuplicateReverseReplicationEvent(t *testing.T) {
 	queuedID := deleteTask.GetReplicationID()
 	r.Equal(reverse.AsString(), queuedID.AsString())
 }
+
+func TestWriteAfterPromotionAdvancesOldVectorAndReplicatesToNewTarget(t *testing.T) {
+	r := require.New(t)
+	queue := &taskRecorder{}
+	versions := meta.NewVersionService(testutil.SetupRedis(t))
+	original := entity.UniversalFromBucketReplication(entity.BucketReplicationPolicy{
+		User: "user", FromStorage: "a", FromBucket: "bucket", ToStorage: "b", ToBucket: "bucket",
+	})
+	current := entity.UniversalFromBucketReplication(entity.BucketReplicationPolicy{
+		User: "user", FromStorage: "b", FromBucket: "bucket", ToStorage: "c", ToBucket: "bucket",
+	})
+	switchInfo := entity.ReplicationSwitchInfo{
+		LastStatus:                        entity.StatusPromotedWithBacklog,
+		ReplicationSwitchZeroDowntimeOpts: entity.ReplicationSwitchZeroDowntimeOpts{MultipartTTL: time.Minute},
+	}
+	switchInfo.SetReplicationID(original)
+	ctx := xctx.SetInProgressZeroDowntime(context.Background(), switchInfo)
+	ctx = xctx.SetBucket(ctx, "bucket")
+	ctx = xctx.SetReplications(ctx, []entity.UniversalReplicationID{current})
+	object := dom.Object{Bucket: "bucket", Name: "new-write"}
+	err := NewS3(queue, versions, nil).Replicate(ctx, "b", &tasks.ObjectSyncPayload{Object: object})
+	r.NoError(err)
+
+	oldVector, err := versions.GetObj(t.Context(), original, object)
+	r.NoError(err)
+	r.Equal(1, oldVector.To, "a late A->B event must see that B has newer data and skip its overwrite")
+	r.Len(queue.tasks, 1, "the promoted B->C relationship must receive new writes")
+	queuedTask := queue.tasks[0].(*tasks.ObjectSyncPayload)
+	queuedID := queuedTask.GetReplicationID()
+	r.Equal(current.AsString(), queuedID.AsString())
+}

@@ -73,6 +73,10 @@ func (e encoder[T]) Encode(ctx context.Context, payload T) (*asynq.Task, error) 
 		// generic task retry limit.
 		optionList = append(optionList, asynq.MaxRetry(math.MaxInt32))
 	}
+	if _, ok := any(payload).(ZeroDowntimeReplicationSwitchPayload); ok {
+		// A promoted switch stays scheduled until its repair backlog drains.
+		optionList = append(optionList, asynq.MaxRetry(math.MaxInt32))
+	}
 	if e.taskID != nil {
 		id := e.taskID(payload)
 		if id == "" {

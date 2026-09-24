@@ -65,7 +65,7 @@ func (s *s3Svc) Replicate(ctx context.Context, routedTo string, task tasks.Repli
 		if switchInfo == nil {
 			switchInfo = xctx.GetCompletedZeroDowntime(ctx)
 		}
-		if switchInfo != nil {
+		if switchInfo != nil && switchInfo.LastStatus != entity.StatusPromotedWithBacklog {
 			originalID := switchInfo.ReplicationID()
 			if routedTo == originalID.ToStorage() {
 				destination := meta.Destination{Storage: routedTo, Bucket: xctx.GetBucket(ctx)}
@@ -85,6 +85,42 @@ func (s *s3Svc) Replicate(ctx context.Context, routedTo string, task tasks.Repli
 				if !hasReversePolicy {
 					if err := s.queueSvc.EnqueueTask(ctx, &reverseTask); err != nil {
 						return err
+					}
+				}
+				if len(xctx.GetReplications(ctx)) == 0 {
+					return nil
+				}
+			}
+		}
+	}
+
+	// A promoted switch can stop blocking new replication relationships while
+	// its original A->B repair event remains queued. Keep B's version current in
+	// that old vector so a late repair cannot overwrite newer B data.
+	if objectTask, ok := task.(*tasks.ObjectSyncPayload); ok {
+		backlogSwitch := xctx.GetInProgressZeroDowntime(ctx)
+		if backlogSwitch != nil && backlogSwitch.LastStatus == entity.StatusPromotedWithBacklog {
+			originalID := backlogSwitch.ReplicationID()
+			if routedTo == originalID.ToStorage() {
+				destination := meta.Destination{Storage: routedTo, Bucket: objectTask.Object.Bucket}
+				if _, err := s.versionSvc.IncrementObj(ctx, originalID, objectTask.Object, destination); err != nil {
+					return err
+				}
+				if objectTask.Deleted {
+					reverseTask := *objectTask
+					reverseID := originalID.Swap()
+					reverseTask.SetReplicationID(reverseID)
+					hasReversePolicy := false
+					for _, replID := range xctx.GetReplications(ctx) {
+						if replID.AsString() == reverseID.AsString() {
+							hasReversePolicy = true
+							break
+						}
+					}
+					if !hasReversePolicy {
+						if err := s.queueSvc.EnqueueTask(ctx, &reverseTask); err != nil {
+							return err
+						}
 					}
 				}
 				if len(xctx.GetReplications(ctx)) == 0 {

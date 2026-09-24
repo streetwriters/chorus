@@ -406,6 +406,10 @@ message ReplicationSwitch {
     // All data was replicated to replication destination target and all read
     // and all requests are now routed to it.
     DONE = 5;
+    // Routing is promoted to the destination, but source-dependent repair
+    // events remain queued. Writes can continue and another replication
+    // relationship can be configured; the switch completes after repair drains.
+    PROMOTED_WITH_BACKLOG = 6;
   }
 
   // Current switch status
