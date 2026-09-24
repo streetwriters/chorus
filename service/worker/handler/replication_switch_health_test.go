@@ -43,3 +43,12 @@ func TestSourceOnlineDetectsUnavailableProvider(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, online)
 }
+
+func TestIncompleteInitialDiscoveryCannotPromoteWithBacklog(t *testing.T) {
+	// Even with an outstanding event and an offline source, the target may be
+	// missing objects the initial listing has not discovered yet.
+	require.False(t, shouldPromoteWithBacklog(false, 1, entity.StatusInProgress, false))
+	require.True(t, shouldPromoteWithBacklog(true, 1, entity.StatusInProgress, false))
+	require.False(t, shouldPromoteWithBacklog(true, 1, entity.StatusInProgress, true))
+	require.False(t, shouldPromoteWithBacklog(true, 0, entity.StatusInProgress, false))
+}

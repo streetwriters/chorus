@@ -360,12 +360,12 @@ func (s *switchSvc) handleZeroDowntimeReplicationSwitch(ctx context.Context, p t
 	done := replStatus.InitDone() && replStatus.EventMigration.Unprocessed == 0
 	// check if replication switch can be finished:
 	if !done {
-		if switchPolicy.LastStatus == entity.StatusInProgress && s.clients != nil {
+		if replStatus.InitDone() && replStatus.EventMigration.Unprocessed > 0 && switchPolicy.LastStatus == entity.StatusInProgress && s.clients != nil {
 			sourceOnline, err := s.sourceOnline(ctx, replicationID)
 			if err != nil {
 				return err
 			}
-			if !sourceOnline {
+			if shouldPromoteWithBacklog(replStatus.InitDone(), replStatus.EventMigration.Unprocessed, switchPolicy.LastStatus, sourceOnline) {
 				if err := s.policySvc.PromoteZeroDowntimeReplicationSwitch(ctx, replicationID); err != nil {
 					return err
 				}
@@ -392,6 +392,10 @@ func (s *switchSvc) handleZeroDowntimeReplicationSwitch(ctx context.Context, p t
 	// all good - finish zero downtime replication switch:
 
 	return s.policySvc.CompleteZeroDowntimeReplicationSwitch(ctx, replicationID)
+}
+
+func shouldPromoteWithBacklog(initDone bool, pendingEvents int, status entity.ReplicationSwitchStatus, sourceOnline bool) bool {
+	return initDone && pendingEvents > 0 && status == entity.StatusInProgress && !sourceOnline
 }
 
 func (s *switchSvc) sourceOnline(ctx context.Context, id entity.UniversalReplicationID) (bool, error) {
