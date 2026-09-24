@@ -68,6 +68,12 @@ func (s *svc) HandleObjectSync(ctx context.Context, t *asynq.Task) (err error) {
 		return err
 	}
 	if p.Deleted {
+		// Explicit delete intent remains authoritative when no version exists,
+		// but a delayed source delete must not erase a newer target mutation.
+		if !shouldApplyDeleteVersion(versions) {
+			logger.Info().Int("from_ver", versions.From).Int("to_ver", versions.To).Msg("object delete: skip stale source delete")
+			return nil
+		}
 		return s.objectDelete(ctx, p)
 	}
 	if versions.IsEmpty() {
@@ -109,6 +115,12 @@ func (s *svc) HandleObjectSync(ctx context.Context, t *asynq.Task) (err error) {
 	}
 
 	return nil
+}
+
+func shouldApplyDeleteVersion(versions meta.Version) bool {
+	// Empty version state does not invent a delete; p.Deleted already carries
+	// explicit durable intent. Known state does allow us to reject stale tasks.
+	return versions.IsEmpty() || versions.From > versions.To
 }
 
 func (s *svc) objectDelete(ctx context.Context, p tasks.ObjectSyncPayload) (err error) {
