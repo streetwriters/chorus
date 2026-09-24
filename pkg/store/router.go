@@ -15,6 +15,7 @@
 package store
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 
@@ -53,6 +54,34 @@ func StringToUserUploadObjectConverter(value string) (entity.UserUploadObject, e
 
 type UserUploadStore struct {
 	RedisIDKeySet[entity.UserUploadObjectID, entity.UserUploadObject]
+}
+
+// Replace retains the upload set's existing TTL while atomically replacing a marker.
+func (r *UserUploadStore) Replace(ctx context.Context, id entity.UserUploadObjectID, old, updated entity.UserUploadObject) (bool, error) {
+	key, err := r.MakeKey(id)
+	if err != nil {
+		return false, err
+	}
+	oldValue, err := UserUploadObjectToStringConverter(old)
+	if err != nil {
+		return false, err
+	}
+	updatedValue, err := UserUploadObjectToStringConverter(updated)
+	if err != nil {
+		return false, err
+	}
+	const replaceScript = `
+if redis.call('SISMEMBER', KEYS[1], ARGV[1]) == 0 then
+  return 0
+end
+redis.call('SADD', KEYS[1], ARGV[2])
+redis.call('SREM', KEYS[1], ARGV[1])
+return 1`
+	result, err := r.client.Eval(ctx, replaceScript, []string{key}, oldValue, updatedValue).Int64()
+	if err != nil {
+		return false, err
+	}
+	return result == 1, nil
 }
 
 func NewUserUploadStore(client redis.Cmdable) *UserUploadStore {

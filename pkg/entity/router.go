@@ -29,10 +29,15 @@ func NewUserUploadObjectID(user string, bucket string) UserUploadObjectID {
 }
 
 type UserUploadObject struct {
-	Object    string
-	UploadID  string
-	Storage   string    `json:",omitempty"`
-	StartedAt time.Time `json:",omitempty"`
+	Object                string
+	UploadID              string
+	Storage               string    `json:",omitempty"`
+	StartedAt             time.Time `json:",omitempty"`
+	CompletionTracking    bool      `json:",omitempty"`
+	CompletionRecorded    bool      `json:",omitempty"`
+	CompletedETag         string    `json:",omitempty"`
+	CompletedSize         int64     `json:",omitempty"`
+	CompletedLastModified time.Time `json:",omitempty"`
 }
 
 func NewUserUploadObject(object string, uploadID string, storage ...string) UserUploadObject {

@@ -18,7 +18,6 @@ package router
 
 import (
 	"bytes"
-	"context"
 	"encoding/xml"
 	"io"
 	"net/http"
@@ -61,6 +60,7 @@ func (r *s3Router) createMultipartUpload(req *http.Request) (resp *http.Response
 	id := entity.NewUserUploadObjectID(user, bucket)
 	val := entity.NewUserUploadObject(object, respBody.UploadID, storage)
 	val.StartedAt = time.Now().UTC()
+	val.CompletionTracking = true
 	ttl := multipartUploadTrackingTTL
 	if inProgressSwitch != nil {
 		ttl = inProgressSwitch.MultipartTTL
@@ -91,11 +91,11 @@ func (r *s3Router) completeMultipartUpload(req *http.Request) (resp *http.Respon
 	var reconciledObject *mclient.ObjectInfo
 	// CompleteMultipartUpload is not idempotent at S3: after a successful
 	// completion, a retry with the same upload ID returns NoSuchUpload. Keep the
-	// upload marker until its object event is queued and use HEAD to reconcile
-	// that retry with the committed object.
+	// bounded marker so HEAD can reconcile a retry even after event enqueue or
+	// response delivery has already succeeded.
 	if isApiErr && err != nil && trackedUpload != nil && mclient.ToErrorResponse(err).Code == "NoSuchUpload" {
 		if info, statErr := client.S3().StatObject(ctx, bucket, object, mclient.StatObjectOptions{}); statErr == nil &&
-			(trackedUpload.StartedAt.IsZero() || !info.LastModified.Add(time.Second).Before(trackedUpload.StartedAt)) {
+			multipartRetryMatches(trackedUpload, info) {
 			reconciledObject = &info
 			etag := info.ETag
 			if !strings.HasPrefix(etag, `"`) {
@@ -135,14 +135,30 @@ func (r *s3Router) completeMultipartUpload(req *http.Request) (resp *http.Respon
 	}
 
 	var objSize int64
+	var committedObject *mclient.ObjectInfo
 	if reconciledObject != nil {
 		objSize = reconciledObject.Size
+		committedObject = reconciledObject
 	} else {
 		objInfo, statErr := client.S3().StatObject(ctx, bucket, object, mclient.StatObjectOptions{})
 		if statErr != nil {
 			zerolog.Ctx(ctx).Err(statErr).Msg("unable to get uploaded object size")
 		} else {
 			objSize = objInfo.Size
+			committedObject = &objInfo
+		}
+	}
+	if trackedUpload != nil && reconciledObject == nil {
+		updated := *trackedUpload
+		updated.CompletionRecorded = true
+		updated.CompletedETag = strings.Trim(res.ETag, `"`)
+		updated.CompletedSize = -1 // HEAD size was unavailable; ETag still identifies the result.
+		if committedObject != nil {
+			updated.CompletedSize = committedObject.Size
+			updated.CompletedLastModified = committedObject.LastModified
+		}
+		if err := r.uploadSvc.UpdateUpload(ctx, entity.NewUserUploadObjectID(user, bucket), *trackedUpload, updated); err != nil {
+			return nil, nil, "", false, err
 		}
 	}
 	obj := dom.Object{
@@ -151,16 +167,7 @@ func (r *s3Router) completeMultipartUpload(req *http.Request) (resp *http.Respon
 		Version: "", // versionID not supported for obj PUT (including multipart)
 	}
 	taskList = []tasks.ReplicationTask{
-		&tasks.ObjectSyncPayload{
-			Object:  obj,
-			ObjSize: objSize,
-			UploadID: func() string {
-				if trackedUpload != nil {
-					return uploadID
-				}
-				return ""
-			}(),
-		},
+		&tasks.ObjectSyncPayload{Object: obj, ObjSize: objSize},
 		&tasks.ObjSyncACLPayload{
 			Object: obj,
 		},
@@ -169,22 +176,19 @@ func (r *s3Router) completeMultipartUpload(req *http.Request) (resp *http.Respon
 		},
 	}
 	return
-
 }
 
-func (r *s3Router) replicationStored(ctx context.Context, task tasks.ReplicationTask) error {
-	objectTask, ok := task.(*tasks.ObjectSyncPayload)
-	if !ok || objectTask.UploadID == "" {
-		return nil
+func multipartRetryMatches(upload *entity.UserUploadObject, info mclient.ObjectInfo) bool {
+	if upload.CompletionTracking && (!upload.CompletionRecorded || upload.CompletedETag == "") {
+		return false
 	}
-	trackedUpload, err := r.uploadSvc.GetUpload(ctx,
-		entity.NewUserUploadObjectID(xctx.GetUser(ctx), objectTask.Object.Bucket),
-		objectTask.Object.Name, objectTask.UploadID)
-	if err != nil || trackedUpload == nil {
-		return err
+	if upload.CompletedETag != "" {
+		return strings.Trim(info.ETag, `"`) == upload.CompletedETag && (upload.CompletedSize < 0 || info.Size == upload.CompletedSize) &&
+			(upload.CompletedLastModified.IsZero() || info.LastModified.Equal(upload.CompletedLastModified))
 	}
-	return r.uploadSvc.DeleteUpload(ctx,
-		entity.NewUserUploadObjectID(xctx.GetUser(ctx), objectTask.Object.Bucket), *trackedUpload)
+	// Older markers do not have a completion receipt. Keep their legacy
+	// timestamp-based recovery, but do not use it for markers written now.
+	return upload.StartedAt.IsZero() || !info.LastModified.Add(time.Second).Before(upload.StartedAt)
 }
 
 func (r *s3Router) abortMultipartUpload(req *http.Request) (resp *http.Response, storage string, isApiErr bool, err error) {

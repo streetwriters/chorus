@@ -17,7 +17,6 @@
 package router
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -157,12 +156,6 @@ func serve(router Router, replSvc replication.Service) http.Handler {
 							StatusCode: http.StatusServiceUnavailable,
 						})
 						return
-					}
-				} else if hook, ok := router.(interface {
-					replicationStored(context.Context, tasks.ReplicationTask) error
-				}); ok {
-					if hookErr := hook.replicationStored(replCtx, task); hookErr != nil {
-						logger.Warn().Err(hookErr).Msg("replication event stored but multipart upload tracking could not be cleared")
 					}
 				}
 			}

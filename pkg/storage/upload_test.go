@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/clyso/chorus/pkg/entity"
+	"github.com/clyso/chorus/pkg/store"
 	"github.com/clyso/chorus/pkg/testutil"
 )
 
@@ -169,4 +170,38 @@ func TestGetUploadReturnsOriginAndTreatsMissingAsAbsent(t *testing.T) {
 	got, err := svc.GetUpload(ctx, id, "object", "upload-1")
 	r.NoError(err)
 	r.Equal(&want, got)
+}
+
+func TestUpdateUploadPreservesMarkerTTLAndIdentity(t *testing.T) {
+	r := require.New(t)
+	redis := testutil.SetupRedis(t)
+	svc := NewUploadSvc(redis)
+	ctx := t.Context()
+	id := entity.NewUserUploadObjectID("u1", "b1")
+	started := entity.NewUserUploadObject("object", "upload-1", "storage-a")
+	started.StartedAt = time.Now().UTC()
+	r.NoError(svc.StoreUpload(ctx, id, started, time.Hour))
+	key, err := store.NewUserUploadStore(redis).MakeKey(id)
+	r.NoError(err)
+	before := redis.TTL(ctx, key).Val()
+
+	completed := started
+	completed.CompletedETag = "etag"
+	completed.CompletedSize = 42
+	completed.CompletedLastModified = time.Now().UTC()
+	r.NoError(svc.UpdateUpload(ctx, id, started, completed))
+	got, err := svc.GetUpload(ctx, id, "object", "upload-1")
+	r.NoError(err)
+	r.Equal(&completed, got)
+	after := redis.TTL(ctx, key).Val()
+	r.Greater(after, time.Duration(0))
+	r.LessOrEqual(after, before, "updating the receipt must not extend marker lifetime")
+
+	wrongIdentity := completed
+	wrongIdentity.Storage = "storage-b"
+	r.Error(svc.UpdateUpload(ctx, id, completed, wrongIdentity))
+	r.NoError(svc.DeleteUpload(ctx, id, completed))
+	other := entity.NewUserUploadObject("other-object", "other-upload", "storage-a")
+	r.NoError(svc.StoreUpload(ctx, id, other, time.Hour))
+	r.Error(svc.UpdateUpload(ctx, id, completed, completed), "an expired or aborted marker cannot be recreated")
 }

@@ -74,6 +74,30 @@ func (r *UploadSvc) GetUpload(ctx context.Context, id entity.UserUploadObjectID,
 	return nil, nil
 }
 
+// UpdateUpload replaces a marker without resetting its existing TTL.
+func (r *UploadSvc) UpdateUpload(ctx context.Context, id entity.UserUploadObjectID, old, updated entity.UserUploadObject) error {
+	if err := validate.UserUploadObjectID(id); err != nil {
+		return fmt.Errorf("unable to validate user upload object id: %w", err)
+	}
+	if err := validate.UserUploadObject(old); err != nil {
+		return fmt.Errorf("unable to validate old user upload object: %w", err)
+	}
+	if err := validate.UserUploadObject(updated); err != nil {
+		return fmt.Errorf("unable to validate updated user upload object: %w", err)
+	}
+	if old.Object != updated.Object || old.UploadID != updated.UploadID || old.Storage != updated.Storage {
+		return fmt.Errorf("upload marker identity cannot be changed")
+	}
+	replaced, err := r.store.Replace(ctx, id, old, updated)
+	if err != nil {
+		return fmt.Errorf("unable to update user upload object: %w", err)
+	}
+	if !replaced {
+		return fmt.Errorf("upload marker expired before completion receipt was stored")
+	}
+	return nil
+}
+
 func (r *UploadSvc) UploadExists(ctx context.Context, id entity.UserUploadObjectID,
 	object entity.UserUploadObject) (bool, error) {
 	if err := validate.UserUploadObjectID(id); err != nil {
