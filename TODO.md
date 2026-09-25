@@ -1,5 +1,23 @@
 # Notesnook HA final pass
 
+## Final batch-delete and topology-gate pass
+
+- [x] DeleteObjects collects, deduplicates, sorts, and acquires the same per-object destination locks as single-object DELETE, across physical batch delete, per-key results, vector updates, and event persistence.
+- [x] Partial batch results advance/persist state only for successful keys; a fake S3 provider returns foo/baz success and bar AccessDenied, and the physical-router path verifies only foo/baz vectors and queue events exist.
+- [x] Deterministic DeleteObjects/Worker copy races cover Worker-first and batch-first orderings and verify physical absence and durable delete intents.
+- [x] Overlapping batch lock-order tests cover reversed two-key and overlapping three-key lists; requests complete without deadlock.
+- [x] Add bucket and user-scope Redis mutation/topology leases with atomic Lua begin/end/renew operations.
+- [x] Atomic BeginMutation rejects while a live bucket or user topology lease owns the scope.
+- [x] Atomic BeginTopologyChange rejects while live mutation leases exist in the affected bucket or user scope.
+- [x] Lease expiry and crash recovery tests cover both lease types; renewal, callback-error cleanup, cancellation, and idempotent release are covered.
+- [x] Replication policy and routing management reject topology changes with active mutations; the AddReplication API integration test returns `codes.Aborted` with `BucketHasActiveMutations` and verifies no policy was installed.
+- [x] S3 visible-object mutations return retryable ServiceUnavailable while topology gate is owned; GET remains ungated and the retried DELETE observes the installed B→C policy and queues to C.
+- [x] Deterministic topology/mutation integration covers an active Proxy DELETE rejecting B→C installation and a topology installation lease rejecting a new DELETE until completion.
+- [x] Different-bucket independence and user-wide route gating are covered by `pkg/store` tests.
+- [ ] Focused/repeated/race tests passed. Notesnook MinIO signing integration and broad suite remain environment-blocked as logged below.
+- [ ] Final live HA lab (dedicated lab/Docker unavailable; see test log).
+- [x] Final adversarial timeline review and accepted limitations recorded below.
+
 ## Required correctness fixes
 
 - [x] Share the Worker object-copy lock with routed single-object Proxy DELETE, holding it through physical deletion, version advancement, and durable replication enqueue. Deterministic channel-gated tests verify Worker-copy-first and Proxy-delete-first ordering, final target absence, and the durable reverse-delete task.
@@ -75,3 +93,25 @@
 - [x] Lock boundary review: lock acquisition errors prevent routing; returned S3, version-update, and enqueue errors exit through deferred release; request cancellation retains/refreshes ownership until the work goroutine exits. The lock cancellation regression passed. If Redis is unavailable long enough for a lease to expire while provider work remains active, a Redis-based lock cannot ensure exclusivity; Redis availability remains an accepted dependency.
 - [x] Mutation failure matrix: S3 DELETE fails before a task is produced => release lock, no version intent; S3 DELETE succeeds and version/enqueue succeeds => release after durable intent; version/enqueue fails => retryable error and release, with client retry needed because S3 and Redis are not transactional. These error branches are verified by inspection, not a new injected-failure test. If the client ignores a 503 after reverse-intent enqueue failure, stale recovery may require operator repair.
 - [x] Multipart retention review: `ExpiresAt` is set once and preserved by receipt updates; Redis Lua atomically SADDs the marker and extends the collection TTL without shortening it; later uploads cannot reset earlier deadlines. Access/update prunes expired members. The controlled-clock TTL regression passed. Legacy markers without `ExpiresAt` cannot recover per-upload original deadlines and remain bounded by their existing set TTL. The final presigning integration attempt was blocked by missing Docker.
+
+## Final batch-delete and topology-gate adversarial review
+
+- [x] Invariant: a delayed Worker copy cannot recreate an object after DeleteObjects. Attack A: Worker holds B's lock mid-copy; batch starts for foo/bar; provider route is not entered until copy releases, then batch deletes B and durable delete tasks are queued. Attack B: batch owns every key lock, deletes B, then pauses before version/event persistence; Worker waits, then sees the newer vector and skips. `TestProxyDeleteObjectsSerializesWithWorkerObjectCopy` asserts final physical B absence and two reverse delete intents in both schedules; `-count=20` and `-race -count=3` passed.
+- [x] Invariant: partial S3 batch response only records successful keys. Attack: provider returns foo/baz under `<Deleted>` and bar under `<Error>`. Actual `s3Router` + Proxy + replication path queued only foo/baz, advanced only their vectors, and left bar's vector empty. Quiet mode was also checked; versioned errors are matched by key plus VersionId. One provider DeleteObjects request is preserved.
+- [x] Invariant: overlapping batch requests cannot deadlock from input-order inversion. Attacks: (a,b) vs (b,a), and (a,b,c) vs (c,b,d). `TestOverlappingDeleteObjectsAcquireLocksInDeterministicOrder` completed both concurrent handlers and verified final absence. `-count=20` and `-race -count=3` passed. Proxy globally deduplicates and sorts by storage, bucket, key, and version before acquiring the existing object locks.
+- [x] Invariant: a mutation and topology operation cannot both pass admission concurrently. The Redis scripts atomically check topology keys and insert mutation leases/index members; topology scripts atomically check/prune active leases and set topology ownership. The race test launches both at once for 100 buckets per run and asserts exactly one wins; `go test ./pkg/store -run 'BucketMutationGate|BucketMutationLease|BucketGateLease' -count=20` and `-race -count=3` passed.
+- [x] Invariant: crashes do not permanently wedge admission. Mutation and topology leases expire; Miniredis FastForward tests prove the opposite operation succeeds after expiry. Long mutation renewal, callback error cleanup, request cancellation ownership, idempotent release, multiple active mutation leases, different buckets, and user-wide topology scopes have tests. Lease state is in Redis; no in-memory counter is authoritative.
+- [x] Invariant: management and S3 paths share the same gate. A real `AddReplication` handler while a Proxy DELETE is held returns `BucketHasActiveMutations`/gRPC `Aborted` and installs no policy. After DELETE completes, retry installs B→C. Conversely, while AddReplication is held at queue persistence, a DELETE returns retryable 503, GET succeeds, then retried DELETE enqueues a B→C event. API/Proxy tests passed under `-race -count=3`.
+- [x] Failover review: `SwitchWithDowntime`, `SwitchWithZeroDowntime`, and worker-driven promotion remain outside the topology gate. These are the existing HA routing transition that must progress with an unavailable source and allow writes to promoted B; policy add/remove and routing changes are gated. This exemption is deliberate and documented in `NOTESNOOK_HA.md`.
+- [x] Restart/error review: leases survive Proxy/Worker process loss in Redis until TTL; `Run` renews active operations and releases on all returned error paths. An API release failure leaves only an expiring lease. Redis availability/coherence remains required for strict exclusion; prolonged Redis loss can expire a lease while provider work is still draining, so the work context is canceled and callers receive retryable failure when possible.
+- [ ] Final MinIO signing integration `go test ./test/minio -count=1` could not initialize Testcontainers: `rootless Docker not found, failed to create Docker provider`; no current-pass AWSSDK presigned cases ran. Earlier passing Notesnook signing result remains historical only.
+- [ ] Final broad `go test ./... -timeout=180s` exited nonzero only in container-backed `test/agent`, `test/diff`, `test/minio`, `test/swift`, and `test/versioned` due the same unavailable Docker provider. All `pkg` and `service` packages passed; `test/migration` passed.
+- [ ] Live HA Compose outage/restart lab was not rerun: this checkout has no dedicated `chorus-ha-test` Compose configuration and the Docker provider is unavailable.
+
+## Final test log
+
+- Focused package set passed: `go test ./pkg/store ./pkg/storage ./pkg/policy ./pkg/replication ./service/proxy/router ./service/worker/handler ./pkg/api ./service/worker`.
+- Gate concurrency stress passed: `go test ./pkg/store -run 'BucketMutationGate|BucketMutationLease|BucketGateLease' -count=20`.
+- Delete/object concurrency stress passed: `go test ./service/proxy/router -run 'DeleteObjects|ProxyDeleteSerializesWithWorkerObjectCopy' -count=20`.
+- Race detector passed: matching `go test -race` commands for `pkg/store`, `service/proxy/router`, and `pkg/api`, each with `-count=3`.
+- Formatting and whitespace checks passed: `gofmt -d` on all modified/new Go sources produced no output; `git diff --check` passed.
