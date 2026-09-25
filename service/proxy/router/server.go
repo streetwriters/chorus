@@ -145,15 +145,16 @@ func serve(router Router, replSvc replication.Service, lockers ...*store.ObjectL
 			return result.err
 		}
 		lockIDs, lockErr := deleteObjectLockIDs(ctx, r)
-		if lockErr != nil {
+		switch {
+		case lockErr != nil:
 			result.err = lockErr
-		} else if objectLocker != nil && len(lockIDs) != 0 {
+		case objectLocker != nil && len(lockIDs) != 0:
 			if err := withObjectLocks(ctx, objectLocker, lockIDs, 0, run); err != nil {
 				if result.err == nil {
 					result.err = err
 				}
 			}
-		} else if lockErr == nil {
+		default:
 			if err := run(); err != nil {
 				result.err = err
 			}
