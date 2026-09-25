@@ -147,7 +147,7 @@ func runProxyDeleteObjectsCopyRace(t *testing.T, workerFirst bool) {
 	objects := map[string]string{"a/bucket/foo": "stale", "b/bucket/foo": "old", "b/bucket/bar": "old"}
 	copySvc := &deleteRaceCopy{mu: objectsMu, objects: objects, started: make(chan struct{}), allowFinish: make(chan struct{})}
 	locker := store.NewObjectLocker(redis, time.Second)
-	worker := workerhandler.New(nil, nil, nil, versions, copySvc, nil, nil, ratelimit.New(redis, nil), nil, locker, nil, nil, nil)
+	worker := workerhandler.New(nil, nil, nil, versions, copySvc, nil, nil, ratelimit.New(redis, nil), nil, locker, nil, nil, nil, nil)
 	workerTask := &tasks.ObjectSyncPayload{Object: foo}
 	workerTask.SetReplicationID(replID)
 	workerPayload, err := json.Marshal(workerTask)
@@ -314,7 +314,7 @@ func runProxyDeleteCopyRace(t *testing.T, workerFirst bool) {
 	copySvc := &deleteRaceCopy{mu: objectsMu, objects: objects, started: make(chan struct{}), allowFinish: make(chan struct{})}
 	locker := store.NewObjectLocker(redis, time.Second)
 	limiter := ratelimit.New(redis, nil)
-	worker := workerhandler.New(nil, nil, nil, versions, copySvc, nil, nil, limiter, nil, locker, nil, nil, nil)
+	worker := workerhandler.New(nil, nil, nil, versions, copySvc, nil, nil, limiter, nil, locker, nil, nil, nil, nil)
 	workerTask := &tasks.ObjectSyncPayload{Object: object}
 	workerTask.SetReplicationID(replID)
 	workerPayload, err := json.Marshal(workerTask)

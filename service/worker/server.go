@@ -133,7 +133,7 @@ func Start(ctx context.Context, app dom.AppInfo, conf *Config) error {
 	checkSvc := handler.NewDiffSvc(confRedis, clientRegistry, queueSvc)
 	checkCtrl := handler.NewDiffCtrl(checkSvc, queueSvc)
 
-	workerSvc := handler.New(conf.Worker, credsSvc, clientRegistry, versionSvc, copySvc, queueSvc, uploadSvc, limiter, objectListStateStore, objectLocker, bucketLocker, replicationStatusLocker, versionedMigrationSvc)
+	workerSvc := handler.New(conf.Worker, credsSvc, clientRegistry, versionSvc, copySvc, queueSvc, uploadSvc, limiter, objectListStateStore, objectLocker, bucketLocker, replicationStatusLocker, versionedMigrationSvc, policySvc)
 
 	stdLogger := log.NewStdLogger()
 	redis.SetLogger(stdLogger)

@@ -78,6 +78,9 @@ func (s *svc) HandleObjectSync(ctx context.Context, t *asynq.Task) (err error) {
 		if err := s.objectDelete(ctx, p); err != nil {
 			return err
 		}
+		if err := s.enqueueSwitchRepairFollowers(ctx, p, toBucket); err != nil {
+			return err
+		}
 		if p.FromVersion > 0 {
 			destination := meta.Destination{Storage: p.ID.ToStorage(), Bucket: toBucket}
 			return s.versionSvc.UpdateIfGreater(ctx, p.ID, p.Object, destination, int(p.FromVersion))
@@ -119,6 +122,9 @@ func (s *svc) HandleObjectSync(ctx context.Context, t *asynq.Task) (err error) {
 		}
 		return err
 	}
+	if err := s.enqueueSwitchRepairFollowers(ctx, p, toBucket); err != nil {
+		return err
+	}
 	logger.Info().Msg("object sync: done")
 
 	if fromVer != 0 {
@@ -126,6 +132,52 @@ func (s *svc) HandleObjectSync(ctx context.Context, t *asynq.Task) (err error) {
 		return s.versionSvc.UpdateIfGreater(ctx, p.ID, p.Object, destination, fromVer)
 	}
 
+	return nil
+}
+
+// enqueueSwitchRepairFollowers forwards a delayed repair applied to a promoted
+// target to that target's active bucket replication policies. Proxy mutations
+// already fan out to all active policies; a Worker copy from the old source
+// bypasses Proxy, so without this step a follower added during backlog would
+// miss objects repaired after its initial listing completed.
+func (s *svc) enqueueSwitchRepairFollowers(ctx context.Context, p tasks.ObjectSyncPayload, targetBucket string) error {
+	if s.replicationPolicySvc == nil {
+		return nil
+	}
+	policies, err := s.replicationPolicySvc.ListBucketReplicationsInfo(ctx, p.ID.User())
+	if err != nil {
+		return fmt.Errorf("list repaired target followers: %w", err)
+	}
+	var switchInfo *entity.ReplicationSwitchInfo
+	for policy, status := range policies {
+		policyID := entity.UniversalFromBucketReplication(policy)
+		if policyID.AsString() == p.ID.AsString() && status.Switch != nil && status.Switch.ReplicationIDStr == p.ID.AsString() {
+			switchInfo = status.Switch
+			break
+		}
+	}
+	if switchInfo == nil || (switchInfo.LastStatus != entity.StatusPromotedWithBacklog && switchInfo.LastStatus != entity.StatusDone) {
+		return nil
+	}
+	for policy, status := range policies {
+		if policy.FromStorage != p.ID.ToStorage() || policy.FromBucket != targetBucket || policy.ToStorage == p.ID.FromStorage() {
+			continue
+		}
+		if status.ReplicationStatus == nil || status.IsArchived {
+			continue
+		}
+		replicationID := entity.UniversalFromBucketReplication(policy)
+		version, err := s.versionSvc.IncrementObj(ctx, replicationID, p.Object, meta.Destination{Storage: policy.FromStorage, Bucket: targetBucket})
+		if err != nil {
+			return fmt.Errorf("advance repaired target follower version: %w", err)
+		}
+		followerTask := p
+		followerTask.FromVersion = int64(version)
+		followerTask.SetReplicationID(replicationID)
+		if err := s.queueSvc.EnqueueTask(ctx, &followerTask); err != nil {
+			return fmt.Errorf("enqueue repaired target follower event: %w", err)
+		}
+	}
 	return nil
 }
 

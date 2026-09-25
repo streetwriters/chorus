@@ -23,6 +23,7 @@ import (
 
 	"github.com/hibiken/asynq"
 
+	"github.com/clyso/chorus/pkg/entity"
 	"github.com/clyso/chorus/pkg/meta"
 	"github.com/clyso/chorus/pkg/objstore"
 	"github.com/clyso/chorus/pkg/ratelimit"
@@ -42,6 +43,10 @@ type Config struct {
 	TaskCheckInterval        time.Duration  `yaml:"taskCheckInterval"`
 	DelayedTaskCheckInterval time.Duration  `yaml:"delayedTaskCheckInterval"`
 	CustomErrRetryInterval   *time.Duration `yaml:"customErrRetryInterval,omitempty"`
+}
+
+type switchRepairPolicyService interface {
+	ListBucketReplicationsInfo(context.Context, string) (map[entity.BucketReplicationPolicy]entity.ReplicationStatusExtended, error)
 }
 
 func (c *Config) Validate() error {
@@ -79,6 +84,7 @@ type svc struct {
 	bucketLocker            *store.BucketLocker
 	replicationstatusLocker *store.ReplicationStatusLocker
 	versionedSvc            *VersionedMigrationSvc
+	replicationPolicySvc    switchRepairPolicyService
 	conf                    *Config
 }
 
@@ -86,7 +92,8 @@ func New(conf *Config, credsSvc objstore.CredsService, clients objstore.Clients,
 	copySvc copy.CopySvc, queueSvc tasks.QueueService, uploadSvc *storage.UploadSvc,
 	limit ratelimit.RPM, listStateStore *store.MigrationObjectListStateStore,
 	objectLocker *store.ObjectLocker, bucketLocker *store.BucketLocker,
-	replicationstatusLocker *store.ReplicationStatusLocker, versionedSvc *VersionedMigrationSvc) *svc {
+	replicationstatusLocker *store.ReplicationStatusLocker, versionedSvc *VersionedMigrationSvc,
+	replicationPolicySvc switchRepairPolicyService) *svc {
 	return &svc{
 		conf:                    conf,
 		credsSvc:                credsSvc,
@@ -100,6 +107,7 @@ func New(conf *Config, credsSvc objstore.CredsService, clients objstore.Clients,
 		objectLocker:            objectLocker,
 		bucketLocker:            bucketLocker,
 		versionedSvc:            versionedSvc,
+		replicationPolicySvc:    replicationPolicySvc,
 		replicationstatusLocker: replicationstatusLocker,
 	}
 }

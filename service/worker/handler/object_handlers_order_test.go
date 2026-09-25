@@ -49,6 +49,14 @@ type orderedCopySvc struct {
 	objects map[string]string
 }
 
+type switchRepairPolicies struct {
+	policies map[entity.BucketReplicationPolicy]entity.ReplicationStatusExtended
+}
+
+func (p *switchRepairPolicies) ListBucketReplicationsInfo(context.Context, string) (map[entity.BucketReplicationPolicy]entity.ReplicationStatusExtended, error) {
+	return p.policies, nil
+}
+
 func (c *orderedCopySvc) GetVersionInfo(context.Context, string, copy.File) ([]entity.ObjectVersionInfo, error) {
 	return nil, nil
 }
@@ -112,6 +120,58 @@ func TestDelayedDeleteV2CannotDeletePutV3CopiedFirst(t *testing.T) {
 	vector, err := versions.GetObj(ctx, replID, object)
 	r.NoError(err)
 	r.Equal(meta.Version{From: 3, To: 3}, vector)
+}
+
+func TestPromotedSourceRepairFansOutToActiveTargetFollower(t *testing.T) {
+	r := require.New(t)
+	redis := testutil.SetupRedis(t)
+	versions := meta.NewVersionService(redis)
+	aToB := entity.UniversalFromBucketReplication(entity.BucketReplicationPolicy{
+		User: "user", FromStorage: "a", FromBucket: "bucket", ToStorage: "b", ToBucket: "bucket",
+	})
+	bToCPolicy := entity.BucketReplicationPolicy{
+		User: "user", FromStorage: "b", FromBucket: "bucket", ToStorage: "c", ToBucket: "bucket",
+	}
+	bToC := entity.UniversalFromBucketReplication(bToCPolicy)
+	object := dom.Object{Bucket: "bucket", Name: "late-repair"}
+	ctx := xctx.SetBucket(context.Background(), "bucket")
+	_, err := versions.IncrementObj(ctx, aToB, object, meta.Destination{Storage: "a", Bucket: "bucket"})
+	r.NoError(err)
+	queue := &orderedObjectQueue{}
+	copySvc := &orderedCopySvc{objects: map[string]string{"a/bucket/late-repair": "repaired"}}
+	switchInfo := entity.ReplicationSwitchInfo{LastStatus: entity.StatusPromotedWithBacklog}
+	switchInfo.SetReplicationID(aToB)
+	aToBPolicy := entity.BucketReplicationPolicy{User: "user", FromStorage: "a", FromBucket: "bucket", ToStorage: "b", ToBucket: "bucket"}
+	worker := &svc{
+		versionSvc:   versions,
+		copySvc:      copySvc,
+		queueSvc:     queue,
+		limit:        ratelimit.New(redis, nil),
+		objectLocker: store.NewObjectLocker(redis, time.Second),
+		replicationPolicySvc: &switchRepairPolicies{
+			policies: map[entity.BucketReplicationPolicy]entity.ReplicationStatusExtended{
+				aToBPolicy: {ReplicationStatus: &entity.ReplicationStatus{IsArchived: true}, Switch: &switchInfo},
+				bToCPolicy: {ReplicationStatus: &entity.ReplicationStatus{}, Switch: &switchInfo},
+			},
+		},
+	}
+
+	aToBTask := &tasks.ObjectSyncPayload{Object: object, FromVersion: 1}
+	aToBTask.SetReplicationID(aToB)
+	payload, err := json.Marshal(aToBTask)
+	r.NoError(err)
+	r.NoError(worker.HandleObjectSync(ctx, asynq.NewTask(tasks.TypeObjectSync, payload)))
+	r.Equal("repaired", copySvc.objects["b/bucket/late-repair"])
+	r.Len(queue.tasks, 1, "repair must durably enqueue the active B-to-C edge")
+	bToCTask, ok := queue.tasks[0].(*tasks.ObjectSyncPayload)
+	r.True(ok)
+	r.Equal(bToC.AsString(), bToCTask.ID.AsString())
+	r.Equal(int64(1), bToCTask.FromVersion)
+
+	payload, err = json.Marshal(bToCTask)
+	r.NoError(err)
+	r.NoError(worker.HandleObjectSync(ctx, asynq.NewTask(tasks.TypeObjectSync, payload)))
+	r.Equal("repaired", copySvc.objects["c/bucket/late-repair"], "downstream follower receives delayed repaired object")
 }
 
 func TestMatchingVersionedDeleteRemovesTarget(t *testing.T) {
