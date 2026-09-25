@@ -21,6 +21,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
+	"github.com/redis/go-redis/v9"
+
 	"github.com/stretchr/testify/require"
 
 	"github.com/clyso/chorus/pkg/entity"
@@ -169,7 +172,10 @@ func TestGetUploadReturnsOriginAndTreatsMissingAsAbsent(t *testing.T) {
 	r.NoError(svc.StoreUpload(ctx, id, want, time.Hour))
 	got, err := svc.GetUpload(ctx, id, "object", "upload-1")
 	r.NoError(err)
-	r.Equal(&want, got)
+	r.Equal(want.Object, got.Object)
+	r.Equal(want.UploadID, got.UploadID)
+	r.Equal(want.Storage, got.Storage)
+	r.False(got.ExpiresAt.IsZero())
 }
 
 func TestUpdateUploadPreservesMarkerTTLAndIdentity(t *testing.T) {
@@ -181,15 +187,17 @@ func TestUpdateUploadPreservesMarkerTTLAndIdentity(t *testing.T) {
 	started := entity.NewUserUploadObject("object", "upload-1", "storage-a")
 	started.StartedAt = time.Now().UTC()
 	r.NoError(svc.StoreUpload(ctx, id, started, time.Hour))
+	startedStored, err := svc.GetUpload(ctx, id, started.Object, started.UploadID)
+	r.NoError(err)
 	key, err := store.NewUserUploadStore(redis).MakeKey(id)
 	r.NoError(err)
 	before := redis.TTL(ctx, key).Val()
 
-	completed := started
+	completed := *startedStored
 	completed.CompletedETag = "etag"
 	completed.CompletedSize = 42
 	completed.CompletedLastModified = time.Now().UTC()
-	r.NoError(svc.UpdateUpload(ctx, id, started, completed))
+	r.NoError(svc.UpdateUpload(ctx, id, *startedStored, completed))
 	got, err := svc.GetUpload(ctx, id, "object", "upload-1")
 	r.NoError(err)
 	r.Equal(&completed, got)
@@ -204,4 +212,43 @@ func TestUpdateUploadPreservesMarkerTTLAndIdentity(t *testing.T) {
 	other := entity.NewUserUploadObject("other-object", "other-upload", "storage-a")
 	r.NoError(svc.StoreUpload(ctx, id, other, time.Hour))
 	r.Error(svc.UpdateUpload(ctx, id, completed, completed), "an expired or aborted marker cannot be recreated")
+}
+
+func TestUploadMarkersKeepIndependentEffectiveTTLWithinBucket(t *testing.T) {
+	r := require.New(t)
+	server := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	svc := NewUploadSvc(client)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	svc.now = func() time.Time { return now }
+	ctx := t.Context()
+	id := entity.NewUserUploadObjectID("u1", "b1")
+	sevenDays := 7 * 24 * time.Hour
+
+	uploadA := entity.NewUserUploadObject("object-a", "upload-a", "storage-a")
+	r.NoError(svc.StoreUpload(ctx, id, uploadA, sevenDays))
+	storedA, err := svc.GetUpload(ctx, id, uploadA.Object, uploadA.UploadID)
+	r.NoError(err)
+	expiresA := storedA.ExpiresAt
+
+	now = now.Add(6 * 24 * time.Hour)
+	uploadB := entity.NewUserUploadObject("object-b", "upload-b", "storage-a")
+	r.NoError(svc.StoreUpload(ctx, id, uploadB, sevenDays))
+	storedA, err = svc.GetUpload(ctx, id, uploadA.Object, uploadA.UploadID)
+	r.NoError(err)
+	r.Equal(expiresA, storedA.ExpiresAt, "adding B must not extend A's original receipt expiry")
+
+	now = expiresA.Add(time.Minute)
+	gotA, err := svc.GetUpload(ctx, id, uploadA.Object, uploadA.UploadID)
+	r.NoError(err)
+	r.Nil(gotA, "A is expired at its own seven-day deadline")
+	gotB, err := svc.GetUpload(ctx, id, uploadB.Object, uploadB.UploadID)
+	r.NoError(err)
+	r.NotNil(gotB, "B remains available through its own receipt window")
+
+	now = gotB.ExpiresAt.Add(time.Minute)
+	exists, err := svc.UploadsExistForUserBucket(ctx, id)
+	r.NoError(err)
+	r.False(exists, "expired receipts are pruned even while the bucket remains active")
 }

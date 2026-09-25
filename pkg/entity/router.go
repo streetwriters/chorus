@@ -33,6 +33,7 @@ type UserUploadObject struct {
 	UploadID              string
 	Storage               string    `json:",omitempty"`
 	StartedAt             time.Time `json:",omitempty"`
+	ExpiresAt             time.Time `json:",omitempty"`
 	CompletionTracking    bool      `json:",omitempty"`
 	CompletionRecorded    bool      `json:",omitempty"`
 	CompletedETag         string    `json:",omitempty"`

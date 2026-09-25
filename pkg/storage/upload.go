@@ -30,11 +30,13 @@ import (
 
 type UploadSvc struct {
 	store *store.UserUploadStore
+	now   func() time.Time
 }
 
 func NewUploadSvc(client redis.Cmdable) *UploadSvc {
 	return &UploadSvc{
 		store: store.NewUserUploadStore(client),
+		now:   time.Now,
 	}
 }
 
@@ -46,11 +48,34 @@ func (r *UploadSvc) StoreUpload(ctx context.Context, id entity.UserUploadObjectI
 	if err := validate.UserUploadObject(object); err != nil {
 		return fmt.Errorf("unable to validate user upload object: %w", err)
 	}
-	if _, err := r.store.Add(ctx, id, object); err != nil {
-		return fmt.Errorf("unable to add user upload object: %w", err)
+	active, oldTTL, err := r.activeUploads(ctx, id)
+	if err != nil {
+		return err
 	}
 	if ttl > 0 {
-		_, _ = r.store.SetTTL(ctx, id, ttl)
+		object.ExpiresAt = r.now().Add(ttl).UTC()
+	}
+	if ttl > 0 {
+		maxTTL := ttl
+		for _, value := range active {
+			if value.ExpiresAt.IsZero() {
+				if oldTTL > maxTTL {
+					maxTTL = oldTTL
+				}
+				continue
+			}
+			remaining := value.ExpiresAt.Sub(r.now())
+			if remaining > maxTTL {
+				maxTTL = remaining
+			}
+		}
+		if _, err := r.store.AddWithTTL(ctx, id, object, maxTTL); err != nil {
+			return fmt.Errorf("unable to add user upload object with expiration: %w", err)
+		}
+		return nil
+	}
+	if _, err := r.store.Add(ctx, id, object); err != nil {
+		return fmt.Errorf("unable to add user upload object: %w", err)
 	}
 	return nil
 }
@@ -59,10 +84,7 @@ func (r *UploadSvc) GetUpload(ctx context.Context, id entity.UserUploadObjectID,
 	if err := validate.UserUploadObjectID(id); err != nil {
 		return nil, fmt.Errorf("unable to validate user upload object id: %w", err)
 	}
-	values, err := r.store.Get(ctx, id)
-	if errors.Is(err, dom.ErrNotFound) {
-		return nil, nil
-	}
+	values, _, err := r.activeUploads(ctx, id)
 	if err != nil {
 		return nil, fmt.Errorf("unable to list user uploads: %w", err)
 	}
@@ -88,6 +110,7 @@ func (r *UploadSvc) UpdateUpload(ctx context.Context, id entity.UserUploadObject
 	if old.Object != updated.Object || old.UploadID != updated.UploadID || old.Storage != updated.Storage {
 		return fmt.Errorf("upload marker identity cannot be changed")
 	}
+	updated.ExpiresAt = old.ExpiresAt
 	replaced, err := r.store.Replace(ctx, id, old, updated)
 	if err != nil {
 		return fmt.Errorf("unable to update user upload object: %w", err)
@@ -106,11 +129,16 @@ func (r *UploadSvc) UploadExists(ctx context.Context, id entity.UserUploadObject
 	if err := validate.UserUploadObject(object); err != nil {
 		return false, fmt.Errorf("unable to validate user upload object: %w", err)
 	}
-	contains, err := r.store.IsMember(ctx, id, object)
+	values, _, err := r.activeUploads(ctx, id)
 	if err != nil {
 		return false, fmt.Errorf("unable to check if upload exists: %w", err)
 	}
-	return contains, nil
+	for _, value := range values {
+		if value.Object == object.Object && value.UploadID == object.UploadID && value.Storage == object.Storage {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (r *UploadSvc) UploadsExistForUser(ctx context.Context, user string) (bool, error) {
@@ -128,11 +156,43 @@ func (r *UploadSvc) UploadsExistForUserBucket(ctx context.Context, id entity.Use
 	if err := validate.UserUploadObjectID(id); err != nil {
 		return false, fmt.Errorf("unable to validate user upload object id: %w", err)
 	}
-	contains, err := r.store.NotEmpty(ctx, id)
+	values, _, err := r.activeUploads(ctx, id)
 	if err != nil {
 		return false, fmt.Errorf("unable to check if user bucket uploads exist: %w", err)
 	}
-	return contains, nil
+	return len(values) != 0, nil
+}
+
+// activeUploads removes expired per-upload receipts before returning the live
+// set. The Redis collection TTL is set to the latest member expiration; the
+// per-entry timestamp prevents later uploads from extending older markers.
+func (r *UploadSvc) activeUploads(ctx context.Context, id entity.UserUploadObjectID) ([]entity.UserUploadObject, time.Duration, error) {
+	values, err := r.store.Get(ctx, id)
+	if errors.Is(err, dom.ErrNotFound) {
+		return nil, 0, nil
+	}
+	if err != nil {
+		return nil, 0, err
+	}
+	oldTTL, err := r.store.TTL(ctx, id)
+	if err != nil {
+		return nil, 0, err
+	}
+	now := r.now()
+	active := make([]entity.UserUploadObject, 0, len(values))
+	for _, value := range values {
+		if !value.ExpiresAt.IsZero() && !now.Before(value.ExpiresAt) {
+			if _, err := r.store.Remove(ctx, id, value); err != nil {
+				return nil, 0, err
+			}
+			continue
+		}
+		active = append(active, value)
+	}
+	if len(active) == 0 {
+		return nil, oldTTL, nil
+	}
+	return active, oldTTL, nil
 }
 
 func (r *UploadSvc) DeleteUpload(ctx context.Context, id entity.UserUploadObjectID, object entity.UserUploadObject) error {
@@ -142,7 +202,14 @@ func (r *UploadSvc) DeleteUpload(ctx context.Context, id entity.UserUploadObject
 	if err := validate.UserUploadObject(object); err != nil {
 		return fmt.Errorf("unable to validate user upload object: %w", err)
 	}
-	if _, err := r.store.Remove(ctx, id, object); err != nil {
+	stored, err := r.GetUpload(ctx, id, object.Object, object.UploadID)
+	if err != nil {
+		return fmt.Errorf("unable to find upload marker to remove: %w", err)
+	}
+	if stored == nil || (object.Storage != "" && object.Storage != stored.Storage) {
+		return nil
+	}
+	if _, err := r.store.Remove(ctx, id, *stored); err != nil {
 		return fmt.Errorf("unable to remove upload: %w", err)
 	}
 	return nil
