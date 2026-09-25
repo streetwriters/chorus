@@ -1,5 +1,80 @@
 # Notesnook HA final pass
 
+## Final Docker/MinIO end-to-end verification — 2026-09-25
+
+This verification used an isolated copy of `/Users/thecodrr/Sources/Repos/api/chorus-ha-test`, with Compose project `chorus-ha-final`, plus a temporary build override at `/private/tmp/chorus-ha-final/fork-images.override.yml`. The original lab was left untouched. Initial images were built from HEAD `5d93dfd3f1ff22b4127696ed2cf8dcb1df9332f8`. The live A→B→C mismatch led to one narrowly scoped production fix in this working tree: delayed repair tasks now enqueue versioned events to active bucket followers of the promoted target, and match the retained switch record to the exact replication edge. The final Worker image was rebuilt from this modified tree; Proxy stayed on the identical current-source image. At run start `git status --short` was empty; `HEAD` remains the listed SHA and the final worktree is dirty with this targeted fix plus documentation/test changes.
+
+Final local image identities: Proxy `chorus-proxy:verify-repair-fanout` = `sha256:d61c412e63f560644f068e1ca235c0d5b7c898a74f84dd2c6e8ce4574ca7cedb`; final Worker `chorus-worker:verify-repair-fanout-v3` = `sha256:9544cc1873d2ed0a4fbdb6634b18e02c3cee24ba39a8cafeb2bbb535616c93c6`. The lab was stopped after inspection without deleting named volumes; the original lab remains untouched.
+
+The latest live-lab results and final command log in this section supersede older environment-blocked/unrun verification notes later in this historical TODO.
+
+Environment recorded:
+
+- Host Go: `go1.27.1 darwin/arm64`; `chorctl --version`: `0.7.10`, SHA `8b680455f4ce5f5a9d934ada4f9422842844b367`; AWS CLI `2.28.9`; .NET `10.0.100`; host `mc RELEASE.2025-08-13T08-35-41Z`.
+- Initial Docker images: Proxy `sha256:b7d23dab343e91f455f1fe5cfc97aee707fc0ad40170a3952f5d8d074f1dc5c1`; Worker `sha256:a033c9525a5aa35aab4d74291a75858f39a237727580d50aa23da8b9b8a477e0`. Final corrected images are listed above. MinIO `sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e`; Redis `sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499`; toolbox mc `sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727`. The MinIO server reported `2025-09-07T16:13:09Z`.
+- Compose commands used `docker compose -p chorus-ha-final -f /private/tmp/chorus-ha-final/docker-compose.yml -f /private/tmp/chorus-ha-final/fork-images.override.yml ...`. Container service ports: A `9000`, B `9010`, C `9020`, Proxy `9669`, Worker management `9670/9671`.
+
+| Invariant / section | Exact test and observed result | Result |
+|---|---|---|
+| Correct fork image and healthy baseline | Built Proxy/Worker from current source using Compose build args `SERVICE`, `GIT_COMMIT`, `GIT_TAG`; started Redis/A/B/C/Proxy/Worker and configured `main`, `follower`, `c`, `proxy` aliases. Created `test` on A/B; `chorctl repl add --user=user1 --from=main --to=follower --from-bucket=test`; status reached 100%, 5/5 objects, 0 pending events. `mc diff main/test follower/test` was empty. | PASS |
+| Durable blocked A-only repair | Paused Worker, `aws s3 cp repair-test.txt s3://test/repair-test.txt --endpoint-url http://127.0.0.1:9669`; A had object and B did not. Redis DB 1 had pending Asynq task `40fd5c65-00c6-4e24-bbb3-51c089f1c955` with `Object.Name=repair-test.txt`, `FromVersion=1`. Killed A while Worker process remained initialized, then unpaused Worker; event stayed pending and retry logged A unavailable. | PASS |
+| Promote and restart while A dead | Ran `chorctl repl switch zero-downtime --user=user1 --from=main --to=follower --from-bucket=test`; worker log showed `in_progress -> promoted_with_backlog`. Ran `docker compose ... restart chorus-proxy chorus-worker`; both remained Up and management API started with A offline. | PASS |
+| Promoted reads/writes and isolated source-only read | AWS CLI GET/HEAD of `replicated-get.txt` through Proxy succeeded. GET/HEAD of `repair-test.txt` returned `ServiceUnavailable` / HTTP 503, not 404/500. PUT of `post-failover-put.txt` succeeded and direct B read returned the content. | PASS |
+| Multipart with A dead | Uploaded a generated 256 MiB file using AWS CLI `aws s3 cp ... --endpoint-url http://127.0.0.1:9669`; multipart completion succeeded, and B reported `multipart-after-promotion.bin` at 256 MiB. | PASS |
+| Notesnook exact presigning | Ran `go test ./test/minio -count=1`; passed (`ok github.com/clyso/chorus/test/minio 15.740s`). The suite's .NET harness uses AWSSDK.S3 3.7.310.8 and Notesnook `ServiceURL`, `AuthenticationRegion`, path-style SigV4 `GetPreSignedURLAsync` for GET/PUT/UploadPart. | PASS |
+| Single DELETE while A offline and recovery | Deleted `single-delete.txt` via Proxy. B no longer had it; after A returned, A and B both lacked it. This confirms the reverse delete repair in this run. | PASS |
+| DeleteObjects while A offline | One AWS CLI `s3api delete-objects` request for `batch-delete-1.txt` and `batch-delete-2.txt` reported both deleted; both disappeared from B. The first A recovery check was made while reverse tasks were still retrying, and stale A copies were present then; replaying the batch after A returned removed both. To distinguish delayed retry from loss, repeated with fresh `batch-retest-1.txt`/`batch-retest-2.txt`: directly seeded both on A/B, killed A, issued one signed `DeleteObjects` request, confirmed both absent on B, restored A, then after 12 seconds confirmed both absent on A without replay. Worker logs showed both task IDs retrying `Delete` because A DNS was unavailable. Final conclusion: PASS for this repeated scenario; first observation was premature, not evidence of lost intent. | PASS (fresh repeat) |
+| Mutation wins topology gate | Paused B and held an asynchronous Proxy DELETE open; concurrent `chorctl repl add --user=user1 --from=follower --to=follower-c --from-bucket=test` returned `BucketHasActiveMutations`, gRPC `Aborted`; `chorctl repl` showed no B→C policy. After releasing the mutation, retrying add succeeded. The paused MinIO request exceeded the object-lock renewal interval and emitted lock refresh warnings, so this proves gate rejection/retry but is not a clean long-request lock stress result. | PASS with caveat |
+| Topology owns gate: reads vs mutations | Paused A and started async B→C add. Redis DB 2 showed active topology and mutation gate lease keys. During the held operation, GET through Proxy succeeded; DELETE with `AWS_MAX_ATTEMPTS=1` returned S3 `ServiceUnavailable` with “Object mutations are temporarily unavailable. Retry the request.” After ending the topology operation, retry DELETE succeeded. The attempted B→C policy itself was rejected by policy validation (`InvalidArg: ... main ... different from routing follower`), so this verifies the active gate behavior but not that this particular B→C setup succeeded. | PASS with caveat |
+| Late A→B repair with B→C follower | First exact-fork run reproduced the failure: blocked A→B repair drained to B after B→C completed its initial listing; C lacked `repair-test.txt`, direct listings differed, and diff was false. Added a narrow Worker fix to enqueue an explicit versioned B→C task after a switched repair is applied to B. The first rebuild exposed a second edge case because the bucket-scoped switch lookup returned A→B metadata to a B→C task; updated selection to match `ReplicationIDStr` against the exact policy edge. On a clean `test2` bucket, repeated pause→A-only PUT→A kill→promote→B→C add→A restore. The persisted B→C task completed on the corrected Worker, C stat showed the same 15-byte object/ETag, `chorctl repl switch status` showed A→B `DONE`, and `chorctl diff report --brief follower:test2 follower-c:test2` returned `CONSISTENT: true`. The original `test` bucket was also republished through Proxy using the existing object bytes; direct A/B/C listings then contained the same objects, though the old stored diff report still showed its historical false result and a fresh `diff check` returned `InternalError`. | PASS on corrected clean-bucket rerun; old diff record stale |
+| Restart after recovery | `docker compose ... restart chorus-proxy chorus-worker` after A returned; GET and HEAD for `late-repair.txt` succeeded through Proxy, new PUT `post-recovery-restart.txt` succeeded and appeared on B/C, and `chorctl repl switch status` remained `DONE`. Management API was available. | PASS |
+| Optional in-flight multipart | Not run in this final pass. | NOT RUN |
+
+Final code/test commands after the targeted change:
+
+```sh
+go test ./service/worker/handler ./service/worker ./service/proxy/router
+go test -race ./service/worker/handler -run TestPromotedSourceRepairFansOutToActiveTargetFollower -count=10
+go test ./test/minio -count=1
+go test ./pkg/... ./service/...
+go test ./... -timeout=180s
+```
+
+Results: focused packages passed; the targeted Worker regression passed ten race-detector repetitions; MinIO/Notesnook signing passed (`ok github.com/clyso/chorus/test/minio 16.953s`); all `pkg/...` and `service/...` packages passed, including `service/standalone` after stopping the lab. The broad command first failed because the lab still bound `:9669`; after stopping only the isolated project, it was rerun. In that rerun, `test/versioned` failed after 182.768s in the container-backed Ceph test (`ghcr.io/arttor/ceph-test:v19`); the large Testcontainers/Ceph startup log was emitted, so the broad suite is not counted as fully passing. `gofmt` was applied to changed Go files. A final `git diff --check` is recorded after this section is updated.
+
+Exact final comparison commands:
+
+```sh
+CHORUS_ADDRESS=http://127.0.0.1:9671 chorctl repl
+CHORUS_ADDRESS=http://127.0.0.1:9671 chorctl diff
+CHORUS_ADDRESS=http://127.0.0.1:9671 chorctl diff report --brief follower:test follower-c:test
+docker compose -p chorus-ha-final -f /private/tmp/chorus-ha-final/docker-compose.yml -f /private/tmp/chorus-ha-final/fork-images.override.yml exec -T toolbox mc ls --recursive main/test
+docker compose -p chorus-ha-final -f /private/tmp/chorus-ha-final/docker-compose.yml -f /private/tmp/chorus-ha-final/fork-images.override.yml exec -T toolbox mc ls --recursive follower/test
+docker compose -p chorus-ha-final -f /private/tmp/chorus-ha-final/docker-compose.yml -f /private/tmp/chorus-ha-final/fork-images.override.yml exec -T toolbox mc ls --recursive c/test
+```
+
+Final provider state from direct recursive `mc ls` before stopping the isolated project:
+
+| Bucket | A / main | B / follower | C / follower-c |
+|---|---|---|---|
+| `test` | `multipart-after-promotion.bin`, `post-failover-put.txt`, `repair-test.txt`, `replicated-get.txt` | Same four objects | Same four objects |
+| `test2` | `base.txt`, `late-repair.txt`, `post-recovery-restart.txt` | Same three objects | Same three objects |
+
+The deleted keys `single-delete.txt`, `batch-delete-1.txt`, `batch-delete-2.txt`, `batch-retest-1.txt`, and `batch-retest-2.txt` were absent from the final listings. Final `chorctl repl` showed both A→B and B→C for `test2` at 100%, 2/2 events, switch `DONE`; for `test`, A→B was archived/DONE and B→C at 100%, 7/7 events, DONE. The historical diff check for `test` still reported false after its object lists matched; fresh diff check returned InternalError, so the verified diff pass is the clean `test2` check (`CONSISTENT: true`).
+
+Live blocker timeline: pause Worker → PUT an A-only repair through Proxy → kill A → promote B → install B→C → restore A. The initial run showed that Worker direct-copy processing updated A→B but did not fan the applied mutation into B→C. The narrow fix uses the existing bucket policy list, per-edge version vector, and Asynq event queue; it only forwards a repair whose retained switch metadata identifies that exact source→target edge, and excludes the edge back to the old source. The first rebuild's B→C worker retry exposed shared bucket switch metadata; matching policy IDs fixed it. The clean `test2` scenario then converged and passed the B/C diff. The legacy `test` bucket's old diff result remains stale despite identical direct A/B/C listings; a fresh diff check returned InternalError, so that historic report is not counted as a current pass. The fresh batch-delete repeat removed both stale A copies after retries; do not classify the first immediate post-restore observation as a lost intent. No further production changes were made after the clean `test2` pass.
+
+Accepted limitations still apply: multipart provider success followed by a process crash before Redis completion receipt is ambiguous; non-multipart S3 success and Redis enqueue are not atomic and depend on client retry; `MaxInt32` event retries can retain permanent provider errors; strict distributed lock/gate exclusion requires Redis availability; generic overwrites remain outside per-object locking for immutable Notesnook keys. The final live lab did not retest the multipart crash boundary or in-flight multipart provider loss.
+
+### Final live-lab adversarial review
+
+- Invariant: replicated objects remain available after source outage. Attack: A down with a pending source-only item, then GET/HEAD an already replicated object and the missing source-only object. Observed GET/HEAD success for replicated data; source-only request was 503. Test: commands and outcomes above. Remaining limitation: availability of known source-only objects requires A recovery.
+- Invariant: old repair cannot regress B, and an active downstream follower receives the repaired object. Attack: keep A→B event pending, install B→C, recover A and let the old repair run. Initial run failed with C missing; a new Worker regression now verifies versioned B→C event creation and physical copy, and clean live `test2` rerun shows same object on A/B/C and `CONSISTENT: true`. The original test bucket's old diff record remains false after physical objects were brought equal because a new diff check returned InternalError; direct object lists are the evidence for that bucket. Result: PASS for clean rerun, stale original diff report unresolved.
+- Invariant: successful batch deletes eventually remove stale copies. Attack: DeleteObjects on B while A is down, recover A, and observe queued retries. The first observation happened before retry completion; a fresh two-key repeat showed both reverse tasks retrying on A DNS failure, then both stale A objects absent after 12 seconds without client replay. Result: PASS in the repeated check. The original one-time observation remains a timing caveat, not a reproduced lost-intent bug.
+- Invariant: topology/mutation admission is mutually exclusive and reads remain available. Attack: hold each side of the gate; while a topology lease existed, GET succeeded and DELETE returned retryable 503; with a mutation lease, AddReplication returned Aborted/BucketHasActiveMutations. Result: PASS with noted MinIO timeout and policy-validation caveats.
+- Invariant: provider outage does not prevent process recovery. Attack: kill A, promote B, restart Proxy/Worker. Both processes and management API started; B route served reads/writes. After A recovered and repair drained, restarted Proxy/Worker again; GET/HEAD and a new PUT to B/C succeeded. Result: PASS.
+- Invariant: Notesnook presigned requests remain compatible. Attack: current exact AWSSDK.S3 3.7.310.8 MinIO integration cases. Result: PASS (`go test ./test/minio -count=1`).
+
 ## Final batch-delete and topology-gate pass
 
 - [x] DeleteObjects collects, deduplicates, sorts, and acquires the same per-object destination locks as single-object DELETE, across physical batch delete, per-key results, vector updates, and event persistence.
@@ -14,8 +89,8 @@
 - [x] S3 visible-object mutations return retryable ServiceUnavailable while topology gate is owned; GET remains ungated and the retried DELETE observes the installed B→C policy and queues to C.
 - [x] Deterministic topology/mutation integration covers an active Proxy DELETE rejecting B→C installation and a topology installation lease rejecting a new DELETE until completion.
 - [x] Different-bucket independence and user-wide route gating are covered by `pkg/store` tests.
-- [ ] Focused/repeated/race tests passed. Notesnook MinIO signing integration and broad suite remain environment-blocked as logged below.
-- [ ] Final live HA lab (dedicated lab/Docker unavailable; see test log).
+- [x] Focused worker/proxy packages, targeted race regression, `go test ./pkg/... ./service/...`, and Notesnook MinIO signing integration passed after the final targeted change; broad suite outcome is recorded above.
+- [x] Final live HA lab completed. Initial C convergence failure reproduced, one narrow Worker repair fan-out fix applied, and the clean `test2` A→B→C rerun passed; untested/incomplete cases remain listed above.
 - [x] Final adversarial timeline review and accepted limitations recorded below.
 
 ## Required correctness fixes
@@ -58,7 +133,7 @@
 - [ ] Check delete resurrection across outages, restarts, reverse replication, and old queued event retries.
 - [ ] Walk every multipart completion crash/enqueue boundary and verify committed objects retain recoverable replication intent.
 - [ ] Check Proxy, Worker, and Redis independent restarts with durable backlog/delete/recovery state.
-- [x] B→C unit coverage verifies writes fan out to the new follower while retaining reverse A repair; full A→B→C drain test remains unverified.
+- [x] B→C unit coverage and clean live A→B→C drain test verify delayed switched repair reaches the new follower while retaining the reverse repair path.
 - [x] Reviewed retry policy. Object events retain `MaxInt32` retries; permanent errors can remain queued under Asynq backoff (accepted operational limitation, no classifier added).
 
 ## Test log / blockers
