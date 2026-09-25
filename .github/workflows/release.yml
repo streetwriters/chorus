@@ -8,6 +8,7 @@ env:
 jobs:
   # build and publish docker images
   docker:
+    if: github.repository == 'clyso/chorus'
     strategy:
       matrix:
         image:
@@ -53,6 +54,7 @@ jobs:
             SERVICE=${{ matrix.image.name }}
   # publish helm chart
   helm:
+    if: github.repository == 'clyso/chorus'
     needs: docker
     runs-on: ubuntu-latest
     steps:
@@ -72,6 +74,7 @@ jobs:
           helm push ./chorus-${{ steps.chartVer.outputs.result }}.tgz oci://${{ env.REGISTRY }}/chorus
   # publish github Release
   release:
+    if: github.repository == 'clyso/chorus'
     needs: helm
     runs-on: ubuntu-latest
     steps:

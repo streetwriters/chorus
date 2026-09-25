@@ -18,7 +18,7 @@ Chorus is a distributed, vendor-agnostic tool for backup, migration, and routing
 
 ## Notesnook fork
 
-This fork evaluates and hardens Chorus for Notesnook's active/passive S3 high-availability needs. It focuses on provider outages, failover and recovery, delete safety, multipart uploads, and compatibility with existing Notesnook clients. The changes and verification results are documented in [NOTESNOOK_HA.md](./NOTESNOOK_HA.md).
+This fork evaluates and hardens Chorus for Notesnook's active/passive S3 high-availability needs. It focuses on provider outages, failover and recovery, delete safety, multipart uploads, and compatibility with existing Notesnook clients. The changes and verification results are documented in [NOTESNOOK_HA.md](./NOTESNOOK_HA.md). Version tags publish multi-platform images to GitHub Container Registry as `ghcr.io/streetwriters/chorus-worker`, `ghcr.io/streetwriters/chorus-proxy`, and `ghcr.io/streetwriters/chorus-web-ui`, tagged with the release version and `latest`. Newly published packages are private by default; make them public in GitHub Packages settings if anonymous pulls are needed.
 
 Listed features can be configured per S3 user and per bucket with [management CLI](./tools/chorctl), [REST](https://petstore.swagger.io/?url=https://raw.githubusercontent.com/clyso/chorus/refs/heads/main/proto/gen/openapi/chorus/chorus.swagger.json)/[gRPC](./proto/chorus/chorus.proto) API, or [WebUI](./ui/).
 
