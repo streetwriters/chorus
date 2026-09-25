@@ -17,18 +17,25 @@
 package router
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
+	"time"
 
 	mclient "github.com/minio/minio-go/v7"
 	"github.com/rs/zerolog"
 	"go.opentelemetry.io/otel"
 
+	xctx "github.com/clyso/chorus/pkg/ctx"
 	"github.com/clyso/chorus/pkg/dom"
+	"github.com/clyso/chorus/pkg/entity"
 	"github.com/clyso/chorus/pkg/log"
 	"github.com/clyso/chorus/pkg/objstore"
 	"github.com/clyso/chorus/pkg/replication"
+	"github.com/clyso/chorus/pkg/s3"
+	"github.com/clyso/chorus/pkg/store"
 	"github.com/clyso/chorus/pkg/tasks"
 	"github.com/clyso/chorus/pkg/util"
 )
@@ -44,6 +51,7 @@ type Config struct {
 type StorageProxy struct {
 	Router             Router
 	Replicator         replication.Service
+	ObjectLocker       *store.ObjectLocker
 	AuthMiddleware     func(next http.Handler) http.Handler
 	ReqParseMiddleware func(next http.Handler) http.Handler
 }
@@ -80,7 +88,7 @@ func New(config Config) (http.Handler, error) {
 	handlers := make(map[dom.StorageType]http.Handler, len(config.Storages))
 	for storType, storProxy := range config.Storages {
 		// 8. main request handler. Forward request to storage backend and emit replication tasks
-		handler := serve(storProxy.Router, storProxy.Replicator)
+		handler := serve(storProxy.Router, storProxy.Replicator, storProxy.ObjectLocker)
 		if config.TraceMiddleware != nil {
 			// 7. tracing
 			handler = config.TraceMiddleware(handler)
@@ -117,7 +125,11 @@ func New(config Config) (http.Handler, error) {
 
 }
 
-func serve(router Router, replSvc replication.Service) http.Handler {
+func serve(router Router, replSvc replication.Service, lockers ...*store.ObjectLocker) http.Handler {
+	var objectLocker *store.ObjectLocker
+	if len(lockers) != 0 {
+		objectLocker = lockers[0]
+	}
 	// Use a custom handler function instead of ServeMux to avoid automatic redirects
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx, span := otel.Tracer("").Start(r.Context(), "Route")
@@ -126,51 +138,141 @@ func serve(router Router, replSvc replication.Service) http.Handler {
 		logger := zerolog.Ctx(r.Context())
 		logger.Debug().Msg("proxy: new request received")
 
-		resp, taskList, storage, isApiErr, err := router.Route(r)
-		if err != nil {
-			util.WriteError(r.Context(), w, err)
+		var result routeResult
+		run := func() error {
+			result = routeAndReplicate(ctx, router, replSvc, r)
+			return result.err
+		}
+		if lockIDs := deleteObjectLockIDs(ctx); objectLocker != nil && len(lockIDs) != 0 {
+			if err := withObjectLocks(ctx, objectLocker, lockIDs, 0, run); err != nil {
+				if result.err == nil {
+					result.err = err
+				}
+			}
+		} else if err := run(); err != nil {
+			result.err = err
+		}
+		if result.err != nil {
+			if result.retryAfter || xctx.GetMethod(ctx) == s3.DeleteObject {
+				w.Header().Set("Retry-After", "1")
+			}
+			util.WriteError(ctx, w, result.err)
 			return
 		}
+		resp := result.resp
 		defer func() {
 			if resp != nil && resp.Body != nil {
 				_ = resp.Body.Close()
 			}
 		}()
-		ctx = log.WithStorage(ctx, storage)
-		// TODO: is it reachable? This branch is active only if err == nil
-		if isApiErr {
-			zerolog.Ctx(ctx).Info().Err(err).Msg("s3 api error returned")
-			// create replication tasks according to replication rules
-		} else {
-			replCtx, cancel := log.StartNew(ctx)
-			defer cancel()
-			for _, task := range taskList {
-				replErr := replSvc.Replicate(replCtx, storage, task)
-				if replErr != nil {
-					logger.Err(replErr).Msg("unable to handle replication")
-					if isObjectSyncTask(task) {
-						w.Header().Set("Retry-After", "1")
-						util.WriteError(ctx, w, mclient.ErrorResponse{
-							Code:       "ServiceUnavailable",
-							Message:    "The write succeeded on the active provider but its replication event could not be stored. Retry the request.",
-							StatusCode: http.StatusServiceUnavailable,
-						})
-						return
-					}
-				}
-			}
-		}
 		// Forward response to original client
 		for k, v := range resp.Header {
 			w.Header().Set(k, v[0])
 		}
 		w.WriteHeader(resp.StatusCode)
-		_, err = io.Copy(w, resp.Body)
-		if err != nil {
+		if _, err := io.Copy(w, resp.Body); err != nil {
 			logger.Err(err).Msg("unable to copy response body")
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
+	})
+}
+
+type routeResult struct {
+	resp       *http.Response
+	err        error
+	retryAfter bool
+}
+
+func routeAndReplicate(ctx context.Context, router Router, replSvc replication.Service, req *http.Request) routeResult {
+	resp, taskList, storage, isApiErr, err := router.Route(req)
+	if err != nil {
+		return routeResult{err: err}
+	}
+	ctx = log.WithStorage(ctx, storage)
+	if isApiErr {
+		zerolog.Ctx(ctx).Info().Msg("s3 api error returned")
+		return routeResult{resp: resp}
+	}
+	replCtx, cancel := log.StartNew(ctx)
+	defer cancel()
+	for _, task := range taskList {
+		if replErr := replSvc.Replicate(replCtx, storage, task); replErr != nil {
+			zerolog.Ctx(ctx).Err(replErr).Msg("unable to handle replication")
+			if isObjectSyncTask(task) {
+				if resp != nil && resp.Body != nil {
+					_ = resp.Body.Close()
+				}
+				return routeResult{retryAfter: true, err: mclient.ErrorResponse{
+					Code:       "ServiceUnavailable",
+					Message:    "The write succeeded on the active provider but its replication event could not be stored. Retry the request.",
+					StatusCode: http.StatusServiceUnavailable,
+				}}
+			}
+		}
+	}
+	return routeResult{resp: resp}
+}
+
+func deleteObjectLockIDs(ctx context.Context) []entity.ObjectLockID {
+	if xctx.GetMethod(ctx) != s3.DeleteObject || xctx.GetObject(ctx) == "" {
+		return nil
+	}
+	replications := xctx.GetReplications(ctx)
+	switchInfo := xctx.GetInProgressZeroDowntime(ctx)
+	if switchInfo == nil {
+		switchInfo = xctx.GetCompletedZeroDowntime(ctx)
+	}
+	if len(replications) == 0 && switchInfo == nil {
+		return nil
+	}
+	bucket, object, version := xctx.GetBucket(ctx), xctx.GetObject(ctx), xctx.GetObjectVer(ctx)
+	ids := make(map[entity.ObjectLockID]struct{})
+	add := func(storage, targetBucket string) {
+		if storage != "" && targetBucket != "" {
+			ids[entity.NewVersionedObjectLockID(storage, targetBucket, object, version)] = struct{}{}
+		}
+	}
+	add(xctx.GetRoutingPolicy(ctx), bucket)
+	for _, replicationID := range replications {
+		_, toBucket := replicationID.FromToBuckets(bucket)
+		add(replicationID.ToStorage(), toBucket)
+	}
+	if switchInfo != nil {
+		id := switchInfo.ReplicationID()
+		_, toBucket := id.FromToBuckets(bucket)
+		add(id.ToStorage(), toBucket)
+		// A B->A recovery policy may be installed after this request's policy
+		// context was read. Lock that potential destination as well so an
+		// already-started recovery copy cannot race this delete handoff.
+		reverseID := id.Swap()
+		_, reverseToBucket := reverseID.FromToBuckets(bucket)
+		add(reverseID.ToStorage(), reverseToBucket)
+	}
+	result := make([]entity.ObjectLockID, 0, len(ids))
+	for id := range ids {
+		result = append(result, id)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Storage == result[j].Storage {
+			return result[i].Bucket < result[j].Bucket
+		}
+		return result[i].Storage < result[j].Storage
+	})
+	return result
+}
+
+func withObjectLocks(ctx context.Context, locker *store.ObjectLocker, ids []entity.ObjectLockID, index int, work func() error) error {
+	if index == len(ids) {
+		return work()
+	}
+	lock, err := locker.Lock(ctx, ids[index], store.WithRetry(true))
+	if err != nil {
+		return err
+	}
+	defer lock.Release(ctx)
+	return lock.Do(ctx, 2*time.Second, func() error {
+		return withObjectLocks(ctx, locker, ids, index+1, work)
 	})
 }
 

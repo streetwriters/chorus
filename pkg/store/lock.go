@@ -78,13 +78,25 @@ func (r *Lock) Do(ctx context.Context, refresh time.Duration, work func() error)
 	timer := time.NewTimer(refresh)
 	defer timer.Stop()
 	i := 0
+	cancelled := false
 	for {
+		var cancel <-chan struct{}
+		if !cancelled {
+			cancel = ctx.Done()
+		}
 		select {
-		case <-ctx.Done():
-			return fmt.Errorf("%w: refresh context canceled: %w", context.Canceled, ctx.Err())
+		case <-cancel:
+			// Keep ownership until the operation observes cancellation and exits.
+			// Releasing while its goroutine is still mutating storage would let a
+			// competing operation enter the same critical section.
+			cancelled = true
 		case <-timer.C:
 			i++
-			err = r.Refresh(ctx, refreshInterval)
+			refreshCtx := ctx
+			if cancelled {
+				refreshCtx = context.Background()
+			}
+			err = r.Refresh(refreshCtx, refreshInterval)
 			if err != nil {
 				zerolog.Ctx(ctx).Err(err).
 					Str("refresh_period", refresh.String()).

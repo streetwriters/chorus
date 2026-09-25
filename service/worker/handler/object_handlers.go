@@ -32,6 +32,7 @@ import (
 	"github.com/clyso/chorus/pkg/log"
 	"github.com/clyso/chorus/pkg/meta"
 	"github.com/clyso/chorus/pkg/s3"
+	"github.com/clyso/chorus/pkg/store"
 	"github.com/clyso/chorus/pkg/tasks"
 	"github.com/clyso/chorus/service/worker/copy"
 )
@@ -58,7 +59,7 @@ func (s *svc) HandleObjectSync(ctx context.Context, t *asynq.Task) (err error) {
 	}
 
 	objectLockID := entity.NewVersionedObjectLockID(p.ID.ToStorage(), toBucket, p.Object.Name, p.Object.Version)
-	lock, err := s.objectLocker.Lock(ctx, objectLockID)
+	lock, err := s.objectLocker.Lock(ctx, objectLockID, store.WithRetry(true))
 	if err != nil {
 		return err
 	}

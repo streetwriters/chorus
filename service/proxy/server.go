@@ -40,6 +40,7 @@ import (
 	"github.com/clyso/chorus/pkg/rpc"
 	"github.com/clyso/chorus/pkg/s3"
 	"github.com/clyso/chorus/pkg/storage"
+	"github.com/clyso/chorus/pkg/store"
 	"github.com/clyso/chorus/pkg/tasks"
 	"github.com/clyso/chorus/pkg/trace"
 	"github.com/clyso/chorus/pkg/util"
@@ -84,6 +85,9 @@ func Start(ctx context.Context, app dom.AppInfo, conf *Config) error {
 	verSvc := meta.NewVersionService(appRedis)
 	uploadSvc := storage.NewUploadSvc(appRedis)
 	limiter := ratelimit.New(appRedis, conf.Storage.RateLimitConf())
+	lockRedis := util.NewRedis(conf.Redis, conf.Redis.LockDB)
+	defer lockRedis.Close()
+	objectLocker := store.NewObjectLocker(lockRedis, 0)
 
 	confRedis := util.NewRedis(conf.Redis, conf.Redis.ConfigDB)
 	defer confRedis.Close()
@@ -137,6 +141,7 @@ func Start(ctx context.Context, app dom.AppInfo, conf *Config) error {
 		proxyConfig.Storages[dom.S3] = router.StorageProxy{
 			Router:             routeSvc,
 			Replicator:         replSvc,
+			ObjectLocker:       objectLocker,
 			AuthMiddleware:     authCheck.Wrap,
 			ReqParseMiddleware: router.S3Middleware(conf.Address),
 		}
