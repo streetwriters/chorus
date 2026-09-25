@@ -146,6 +146,9 @@ func (s *svc) enqueueSwitchRepairFollowers(ctx context.Context, p tasks.ObjectSy
 	}
 	policies, err := s.replicationPolicySvc.ListBucketReplicationsInfo(ctx, p.ID.User())
 	if err != nil {
+		if errors.Is(err, dom.ErrNotFound) {
+			return nil
+		}
 		return fmt.Errorf("list repaired target followers: %w", err)
 	}
 	var switchInfo *entity.ReplicationSwitchInfo

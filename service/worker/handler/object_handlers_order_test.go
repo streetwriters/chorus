@@ -51,10 +51,11 @@ type orderedCopySvc struct {
 
 type switchRepairPolicies struct {
 	policies map[entity.BucketReplicationPolicy]entity.ReplicationStatusExtended
+	err      error
 }
 
 func (p *switchRepairPolicies) ListBucketReplicationsInfo(context.Context, string) (map[entity.BucketReplicationPolicy]entity.ReplicationStatusExtended, error) {
-	return p.policies, nil
+	return p.policies, p.err
 }
 
 func (c *orderedCopySvc) GetVersionInfo(context.Context, string, copy.File) ([]entity.ObjectVersionInfo, error) {
@@ -172,6 +173,18 @@ func TestPromotedSourceRepairFansOutToActiveTargetFollower(t *testing.T) {
 	r.NoError(err)
 	r.NoError(worker.HandleObjectSync(ctx, asynq.NewTask(tasks.TypeObjectSync, payload)))
 	r.Equal("repaired", copySvc.objects["c/bucket/late-repair"], "downstream follower receives delayed repaired object")
+}
+
+func TestSwitchRepairFollowersWithoutPoliciesIsNoop(t *testing.T) {
+	r := require.New(t)
+	replID := entity.UniversalFromBucketReplication(entity.BucketReplicationPolicy{
+		User: "user", FromStorage: "a", FromBucket: "bucket", ToStorage: "b", ToBucket: "bucket",
+	})
+	object := dom.Object{Bucket: "bucket", Name: "object"}
+	payload := tasks.ObjectSyncPayload{Object: object}
+	payload.SetReplicationID(replID)
+	worker := &svc{replicationPolicySvc: &switchRepairPolicies{err: dom.ErrNotFound}}
+	r.NoError(worker.enqueueSwitchRepairFollowers(context.Background(), payload, "bucket"))
 }
 
 func TestMatchingVersionedDeleteRemovesTarget(t *testing.T) {
