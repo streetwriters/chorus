@@ -5,9 +5,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	xctx "github.com/clyso/chorus/pkg/ctx"
 	"github.com/clyso/chorus/pkg/entity"
-	"github.com/stretchr/testify/require"
 )
 
 func TestStartNewCopiesCompletedSwitchForDeleteReplication(t *testing.T) {

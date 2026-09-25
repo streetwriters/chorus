@@ -3,8 +3,9 @@ package handler
 import (
 	"testing"
 
-	"github.com/clyso/chorus/pkg/meta"
 	"github.com/stretchr/testify/require"
+
+	"github.com/clyso/chorus/pkg/meta"
 )
 
 func TestDelayedDeleteCannotRemoveNewerTargetObject(t *testing.T) {

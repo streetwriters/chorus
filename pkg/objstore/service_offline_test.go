@@ -5,11 +5,12 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/clyso/chorus/pkg/dom"
 	"github.com/clyso/chorus/pkg/metrics"
 	"github.com/clyso/chorus/pkg/s3"
 	"github.com/clyso/chorus/pkg/s3client"
-	"github.com/stretchr/testify/require"
 )
 
 func TestNewRegistryKeepsOfflineS3StorageAvailableToRouting(t *testing.T) {

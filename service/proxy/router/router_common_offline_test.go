@@ -5,12 +5,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	xctx "github.com/clyso/chorus/pkg/ctx"
 	"github.com/clyso/chorus/pkg/dom"
 	"github.com/clyso/chorus/pkg/entity"
 	"github.com/clyso/chorus/pkg/meta"
 	"github.com/clyso/chorus/pkg/testutil"
-	"github.com/stretchr/testify/require"
 )
 
 func TestAdjustObjReadRouteUsesSwitchReplicationWithBlockedEvents(t *testing.T) {

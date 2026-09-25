@@ -5,9 +5,10 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/clyso/chorus/pkg/metrics"
 	"github.com/clyso/chorus/pkg/s3"
-	"github.com/stretchr/testify/require"
 )
 
 type canceledRoundTripper struct{}

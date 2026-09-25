@@ -40,12 +40,12 @@ type BucketMutationGate struct {
 
 type BucketGateLease struct {
 	client  redis.Scripter
-	ttl     time.Duration
 	token   string
 	mode    string
 	topos   []string
 	indexes []string
 	leases  []string
+	ttl     time.Duration
 }
 
 func NewBucketMutationGate(client redis.Scripter, ttl time.Duration) *BucketMutationGate {

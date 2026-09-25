@@ -5,11 +5,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	xctx "github.com/clyso/chorus/pkg/ctx"
 	"github.com/clyso/chorus/pkg/entity"
 	"github.com/clyso/chorus/pkg/s3"
 	"github.com/clyso/chorus/pkg/testutil"
-	"github.com/stretchr/testify/require"
 )
 
 func TestPromoteZeroDowntimeSwitchWithBacklogReleasesActiveIndexAndCompletesAfterRepair(t *testing.T) {

@@ -8,11 +8,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/clyso/chorus/pkg/ctx"
 	"github.com/clyso/chorus/pkg/dom"
 	"github.com/clyso/chorus/pkg/replication"
 	"github.com/clyso/chorus/pkg/tasks"
-	"github.com/stretchr/testify/require"
 )
 
 type replicationFailureRouter struct{ task tasks.ReplicationTask }

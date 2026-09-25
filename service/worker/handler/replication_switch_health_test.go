@@ -3,12 +3,13 @@ package handler
 import (
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/clyso/chorus/pkg/dom"
 	"github.com/clyso/chorus/pkg/entity"
 	"github.com/clyso/chorus/pkg/metrics"
 	"github.com/clyso/chorus/pkg/objstore"
 	"github.com/clyso/chorus/pkg/s3"
-	"github.com/stretchr/testify/require"
 )
 
 func TestSourceOnlineDetectsUnavailableProvider(t *testing.T) {
