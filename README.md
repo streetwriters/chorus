@@ -16,6 +16,10 @@ Chorus is a distributed, vendor-agnostic tool for backup, migration, and routing
  - Diff check to verify data integrity between storages.
  - Reduce downtime up to zero for switching to different storage provider.
 
+## Notesnook fork
+
+This fork evaluates and hardens Chorus for Notesnook's active/passive S3 high-availability needs. It focuses on provider outages, failover and recovery, delete safety, multipart uploads, and compatibility with existing Notesnook clients. The changes and verification results are documented in [NOTESNOOK_HA.md](./NOTESNOOK_HA.md).
+
 Listed features can be configured per S3 user and per bucket with [management CLI](./tools/chorctl), [REST](https://petstore.swagger.io/?url=https://raw.githubusercontent.com/clyso/chorus/refs/heads/main/proto/gen/openapi/chorus/chorus.swagger.json)/[gRPC](./proto/chorus/chorus.proto) API, or [WebUI](./ui/).
 
 ## Components
