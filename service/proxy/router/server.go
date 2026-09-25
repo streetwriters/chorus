@@ -35,6 +35,7 @@ import (
 	"github.com/clyso/chorus/pkg/objstore"
 	"github.com/clyso/chorus/pkg/replication"
 	"github.com/clyso/chorus/pkg/s3"
+	"github.com/clyso/chorus/pkg/s3client"
 	"github.com/clyso/chorus/pkg/store"
 	"github.com/clyso/chorus/pkg/tasks"
 	"github.com/clyso/chorus/pkg/util"
@@ -143,17 +144,22 @@ func serve(router Router, replSvc replication.Service, lockers ...*store.ObjectL
 			result = routeAndReplicate(ctx, router, replSvc, r)
 			return result.err
 		}
-		if lockIDs := deleteObjectLockIDs(ctx); objectLocker != nil && len(lockIDs) != 0 {
+		lockIDs, lockErr := deleteObjectLockIDs(ctx, r)
+		if lockErr != nil {
+			result.err = lockErr
+		} else if objectLocker != nil && len(lockIDs) != 0 {
 			if err := withObjectLocks(ctx, objectLocker, lockIDs, 0, run); err != nil {
 				if result.err == nil {
 					result.err = err
 				}
 			}
-		} else if err := run(); err != nil {
-			result.err = err
+		} else if lockErr == nil {
+			if err := run(); err != nil {
+				result.err = err
+			}
 		}
 		if result.err != nil {
-			if result.retryAfter || xctx.GetMethod(ctx) == s3.DeleteObject {
+			if result.retryAfter || xctx.GetMethod(ctx) == s3.DeleteObject || xctx.GetMethod(ctx) == s3.DeleteObjects {
 				w.Header().Set("Retry-After", "1")
 			}
 			util.WriteError(ctx, w, result.err)
@@ -196,27 +202,44 @@ func routeAndReplicate(ctx context.Context, router Router, replSvc replication.S
 	}
 	replCtx, cancel := log.StartNew(ctx)
 	defer cancel()
+	var objectReplicationErr error
 	for _, task := range taskList {
 		if replErr := replSvc.Replicate(replCtx, storage, task); replErr != nil {
 			zerolog.Ctx(ctx).Err(replErr).Msg("unable to handle replication")
 			if isObjectSyncTask(task) {
-				if resp != nil && resp.Body != nil {
-					_ = resp.Body.Close()
+				if xctx.GetMethod(ctx) != s3.DeleteObjects {
+					if resp != nil && resp.Body != nil {
+						_ = resp.Body.Close()
+					}
+					return routeResult{retryAfter: true, err: mclient.ErrorResponse{
+						Code:       "ServiceUnavailable",
+						Message:    "The write succeeded on the active provider but its replication event could not be stored. Retry the request.",
+						StatusCode: http.StatusServiceUnavailable,
+					}}
 				}
-				return routeResult{retryAfter: true, err: mclient.ErrorResponse{
-					Code:       "ServiceUnavailable",
-					Message:    "The write succeeded on the active provider but its replication event could not be stored. Retry the request.",
-					StatusCode: http.StatusServiceUnavailable,
-				}}
+				if objectReplicationErr == nil {
+					objectReplicationErr = replErr
+				}
 			}
 		}
+	}
+	if objectReplicationErr != nil {
+		if resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+		return routeResult{retryAfter: true, err: mclient.ErrorResponse{
+			Code:       "ServiceUnavailable",
+			Message:    "The write succeeded on the active provider but its replication event could not be stored. Retry the request.",
+			StatusCode: http.StatusServiceUnavailable,
+		}}
 	}
 	return routeResult{resp: resp}
 }
 
-func deleteObjectLockIDs(ctx context.Context) []entity.ObjectLockID {
-	if xctx.GetMethod(ctx) != s3.DeleteObject || xctx.GetObject(ctx) == "" {
-		return nil
+func deleteObjectLockIDs(ctx context.Context, req *http.Request) ([]entity.ObjectLockID, error) {
+	method := xctx.GetMethod(ctx)
+	if method != s3.DeleteObject && method != s3.DeleteObjects {
+		return nil, nil
 	}
 	replications := xctx.GetReplications(ctx)
 	switchInfo := xctx.GetInProgressZeroDowntime(ctx)
@@ -224,30 +247,45 @@ func deleteObjectLockIDs(ctx context.Context) []entity.ObjectLockID {
 		switchInfo = xctx.GetCompletedZeroDowntime(ctx)
 	}
 	if len(replications) == 0 && switchInfo == nil {
-		return nil
+		return nil, nil
 	}
-	bucket, object, version := xctx.GetBucket(ctx), xctx.GetObject(ctx), xctx.GetObjectVer(ctx)
-	ids := make(map[entity.ObjectLockID]struct{})
-	add := func(storage, targetBucket string) {
-		if storage != "" && targetBucket != "" {
-			ids[entity.NewVersionedObjectLockID(storage, targetBucket, object, version)] = struct{}{}
+	objects := []dom.Object{{Bucket: xctx.GetBucket(ctx), Name: xctx.GetObject(ctx), Version: xctx.GetObjectVer(ctx)}}
+	if method == s3.DeleteObjects {
+		requestBody := deleteObjectsRequest{}
+		if err := s3client.ExtractReqBody(req, &requestBody); err != nil {
+			return nil, err
+		}
+		objects = make([]dom.Object, 0, len(requestBody.Objects))
+		for _, object := range requestBody.Objects {
+			objects = append(objects, object.toDom(xctx.GetBucket(ctx)))
 		}
 	}
-	add(xctx.GetRoutingPolicy(ctx), bucket)
-	for _, replicationID := range replications {
-		_, toBucket := replicationID.FromToBuckets(bucket)
-		add(replicationID.ToStorage(), toBucket)
+	ids := make(map[entity.ObjectLockID]struct{})
+	add := func(storage, targetBucket string, object dom.Object) {
+		if storage != "" && targetBucket != "" {
+			ids[entity.NewVersionedObjectLockID(storage, targetBucket, object.Name, object.Version)] = struct{}{}
+		}
 	}
-	if switchInfo != nil {
-		id := switchInfo.ReplicationID()
-		_, toBucket := id.FromToBuckets(bucket)
-		add(id.ToStorage(), toBucket)
-		// A B->A recovery policy may be installed after this request's policy
-		// context was read. Lock that potential destination as well so an
-		// already-started recovery copy cannot race this delete handoff.
-		reverseID := id.Swap()
-		_, reverseToBucket := reverseID.FromToBuckets(bucket)
-		add(reverseID.ToStorage(), reverseToBucket)
+	for _, object := range objects {
+		if object.Name == "" {
+			continue
+		}
+		add(xctx.GetRoutingPolicy(ctx), object.Bucket, object)
+		for _, replicationID := range replications {
+			_, toBucket := replicationID.FromToBuckets(object.Bucket)
+			add(replicationID.ToStorage(), toBucket, object)
+		}
+		if switchInfo != nil {
+			id := switchInfo.ReplicationID()
+			_, toBucket := id.FromToBuckets(object.Bucket)
+			add(id.ToStorage(), toBucket, object)
+			// A B->A recovery policy may be installed after this request's policy
+			// context was read. Lock that potential destination as well so an
+			// already-started recovery copy cannot race this delete handoff.
+			reverseID := id.Swap()
+			_, reverseToBucket := reverseID.FromToBuckets(object.Bucket)
+			add(reverseID.ToStorage(), reverseToBucket, object)
+		}
 	}
 	result := make([]entity.ObjectLockID, 0, len(ids))
 	for id := range ids {
@@ -255,11 +293,17 @@ func deleteObjectLockIDs(ctx context.Context) []entity.ObjectLockID {
 	}
 	sort.Slice(result, func(i, j int) bool {
 		if result[i].Storage == result[j].Storage {
-			return result[i].Bucket < result[j].Bucket
+			if result[i].Bucket != result[j].Bucket {
+				return result[i].Bucket < result[j].Bucket
+			}
+			if result[i].Name != result[j].Name {
+				return result[i].Name < result[j].Name
+			}
+			return result[i].Version < result[j].Version
 		}
 		return result[i].Storage < result[j].Storage
 	})
-	return result
+	return result, nil
 }
 
 func withObjectLocks(ctx context.Context, locker *store.ObjectLocker, ids []entity.ObjectLockID, index int, work func() error) error {

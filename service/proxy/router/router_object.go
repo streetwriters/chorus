@@ -109,30 +109,34 @@ func (r *s3Router) deleteObjects(req *http.Request) (resp *http.Response, taskLi
 		return
 	}
 
-	if reqBody.Quiet {
-		// quiet mode: filter request objects by response errors
-		errSet := make(map[string]struct{}, len(respBody.Error))
-		for _, delErr := range respBody.Error {
-			errSet[delErr.Key] = struct{}{}
-		}
-		for _, object := range reqBody.Objects {
-			if _, ok := errSet[object.Key]; ok {
-				continue
-			}
-			taskList = append(taskList, &tasks.ObjectSyncPayload{
-				Object:  object.toDom(bucket),
-				Deleted: true,
-			})
-		}
-	} else {
-		// normal mode: use deleted obj list from response
-		taskList = make([]tasks.ReplicationTask, len(respBody.Deleted))
-		for i, object := range respBody.Deleted {
-			taskList[i] = &tasks.ObjectSyncPayload{
-				Object:  object.toDom(bucket),
-				Deleted: true,
-			}
-		}
+	for _, object := range successfulDeleteObjects(bucket, reqBody, respBody) {
+		taskList = append(taskList, &tasks.ObjectSyncPayload{
+			Object:  object,
+			Deleted: true,
+		})
 	}
 	return
+}
+
+func successfulDeleteObjects(bucket string, request deleteObjectsRequest, result multiDeleteResult) []dom.Object {
+	if !request.Quiet {
+		objects := make([]dom.Object, 0, len(result.Deleted))
+		for _, object := range result.Deleted {
+			objects = append(objects, object.toDom(bucket))
+		}
+		return objects
+	}
+	type objectKey struct{ key, version string }
+	errors := make(map[objectKey]struct{}, len(result.Error))
+	for _, failure := range result.Error {
+		errors[objectKey{key: failure.Key, version: failure.VersionID}] = struct{}{}
+	}
+	objects := make([]dom.Object, 0, len(request.Objects))
+	for _, object := range request.Objects {
+		if _, failed := errors[objectKey{key: object.Key, version: object.VersionID}]; failed {
+			continue
+		}
+		objects = append(objects, object.toDom(bucket))
+	}
+	return objects
 }
