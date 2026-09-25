@@ -58,7 +58,12 @@ func PolicyHandlers(
 	replicationStatusLocker *store.ReplicationStatusLocker,
 	userLocker *store.UserLocker,
 	webhookConf *WebhookConfig,
+	mutationGates ...*store.BucketMutationGate,
 ) pb.PolicyServer {
+	var mutationGate *store.BucketMutationGate
+	if len(mutationGates) > 0 {
+		mutationGate = mutationGates[0]
+	}
 	return &policyHandlers{
 		credsSvc:                credsSvc,
 		clients:                 clients,
@@ -71,6 +76,7 @@ func PolicyHandlers(
 		replicationStatusLocker: replicationStatusLocker,
 		userLocker:              userLocker,
 		webhookConf:             webhookConf,
+		mutationGate:            mutationGate,
 	}
 }
 
@@ -88,6 +94,7 @@ type policyHandlers struct {
 	replicationStatusLocker *store.ReplicationStatusLocker
 	userLocker              *store.UserLocker
 	webhookConf             *WebhookConfig
+	mutationGate            *store.BucketMutationGate
 }
 
 func (h *policyHandlers) AddReplication(ctx context.Context, req *pb.AddReplicationRequest) (*emptypb.Empty, error) {
@@ -99,18 +106,22 @@ func (h *policyHandlers) AddReplication(ctx context.Context, req *pb.AddReplicat
 	if err := h.credsSvc.ValidateReplicationID(uid); err != nil {
 		return nil, err
 	}
-	// acquire user lock
-	err = h.inUserLock(ctx, req.Id.User, func() error {
-		if userRepl, ok := uid.AsUserID(); ok {
-			// create user replication
-			return h.addUserReplication(ctx, userRepl, req)
-		} else if bucketRepl, ok := uid.AsBucketID(); ok {
-			// create bucket replication
-			return h.addBucketReplication(ctx, bucketRepl, req)
-		} else {
-			return fmt.Errorf("%w: invalid replication ID", dom.ErrInvalidArg)
-		}
-	})
+	change := func(changeCtx context.Context) error {
+		return h.inUserLock(changeCtx, req.Id.User, func() error {
+			if userRepl, ok := uid.AsUserID(); ok {
+				return h.addUserReplication(changeCtx, userRepl, req)
+			} else if bucketRepl, ok := uid.AsBucketID(); ok {
+				return h.addBucketReplication(changeCtx, bucketRepl, req)
+			} else {
+				return fmt.Errorf("%w: invalid replication ID", dom.ErrInvalidArg)
+			}
+		})
+	}
+	bucket := ""
+	if bucketRepl, ok := uid.AsBucketID(); ok {
+		bucket = bucketRepl.FromBucket
+	}
+	err = h.withTopologyChange(ctx, uid.User(), bucket, change)
 	if err != nil {
 		return nil, err
 	}
@@ -298,47 +309,54 @@ func (h *policyHandlers) DeleteReplication(ctx context.Context, req *pb.Replicat
 	if err != nil {
 		return nil, err
 	}
-	existing, err := h.policySvc.GetReplicationPolicyInfoExtended(ctx, uid)
-	if err != nil {
-		return nil, err
-	}
-	isAgent := existing.AgentURL != ""
-	err = h.inReplicationLock(ctx, uid, func() error {
-		if userRepl, ok := uid.AsUserID(); ok {
-			// delete user replication
-			err = h.policySvc.DeleteUserReplication(ctx, userRepl)
-			if err != nil {
-				return err
-			}
-		} else if bucketRepl, ok := uid.AsBucketID(); ok {
-			// create bucket replication
-			err = h.policySvc.DeleteBucketReplication(ctx, bucketRepl)
-			if err != nil {
-				return fmt.Errorf("%w: unable to delete replication policy", err)
-			}
-			if isAgent {
-				err = h.notificationSvc.DeleteBucketNotification(ctx, bucketRepl.FromStorage, bucketRepl.User, bucketRepl.FromBucket)
+	change := func(changeCtx context.Context) error {
+		existing, err := h.policySvc.GetReplicationPolicyInfoExtended(changeCtx, uid)
+		if err != nil {
+			return err
+		}
+		isAgent := existing.AgentURL != ""
+		return h.inReplicationLock(changeCtx, uid, func() error {
+			if userRepl, ok := uid.AsUserID(); ok {
+				// delete user replication
+				err = h.policySvc.DeleteUserReplication(changeCtx, userRepl)
 				if err != nil {
-					zerolog.Ctx(ctx).Err(err).Msg("unable to delete agent bucket notification")
+					return err
 				}
+			} else if bucketRepl, ok := uid.AsBucketID(); ok {
+				// create bucket replication
+				err = h.policySvc.DeleteBucketReplication(changeCtx, bucketRepl)
+				if err != nil {
+					return fmt.Errorf("%w: unable to delete replication policy", err)
+				}
+				if isAgent {
+					err = h.notificationSvc.DeleteBucketNotification(changeCtx, bucketRepl.FromStorage, bucketRepl.User, bucketRepl.FromBucket)
+					if err != nil {
+						zerolog.Ctx(ctx).Err(err).Msg("unable to delete agent bucket notification")
+					}
+				}
+			} else {
+				return fmt.Errorf("%w: invalid replication ID", dom.ErrInvalidArg)
 			}
-		} else {
-			return fmt.Errorf("%w: invalid replication ID", dom.ErrInvalidArg)
-		}
-		err = h.versionSvc.Cleanup(ctx, uid)
-		if err != nil {
-			return fmt.Errorf("%w: unable to delete version metadata", err)
-		}
-		err = h.objectListStateStore.DeleteForReplication(ctx, uid)
-		if err != nil {
-			return fmt.Errorf("%w: unable to delete list obj metadata", err)
-		}
-		err = h.bucketListStateStore.DeleteForReplication(ctx, uid)
-		if err != nil {
-			return fmt.Errorf("%w: unable to delete list bucket metadata", err)
-		}
-		return nil
-	})
+			err = h.versionSvc.Cleanup(changeCtx, uid)
+			if err != nil {
+				return fmt.Errorf("%w: unable to delete version metadata", err)
+			}
+			err = h.objectListStateStore.DeleteForReplication(changeCtx, uid)
+			if err != nil {
+				return fmt.Errorf("%w: unable to delete list obj metadata", err)
+			}
+			err = h.bucketListStateStore.DeleteForReplication(changeCtx, uid)
+			if err != nil {
+				return fmt.Errorf("%w: unable to delete list bucket metadata", err)
+			}
+			return nil
+		})
+	}
+	bucket := ""
+	if bucketRepl, ok := uid.AsBucketID(); ok {
+		bucket = bucketRepl.FromBucket
+	}
+	err = h.withTopologyChange(ctx, uid.User(), bucket, change)
 	if err != nil {
 		return nil, err
 	}
@@ -350,9 +368,16 @@ func (h *policyHandlers) DeleteSwitch(ctx context.Context, req *pb.ReplicationID
 	if err != nil {
 		return nil, err
 	}
-	err = h.inReplicationLock(ctx, uid, func() error {
-		return h.policySvc.DeleteReplicationSwitch(ctx, uid)
-	})
+	change := func(changeCtx context.Context) error {
+		return h.inReplicationLock(changeCtx, uid, func() error {
+			return h.policySvc.DeleteReplicationSwitch(changeCtx, uid)
+		})
+	}
+	bucket := ""
+	if bucketRepl, ok := uid.AsBucketID(); ok {
+		bucket = bucketRepl.FromBucket
+	}
+	err = h.withTopologyChange(ctx, uid.User(), bucket, change)
 	if err != nil {
 		return nil, err
 	}
@@ -722,19 +747,44 @@ func (h *policyHandlers) inReplicationLock(ctx context.Context, id entity.Univer
 	return lock.Do(ctx, time.Second, fn)
 }
 
+func (h *policyHandlers) withTopologyChange(ctx context.Context, user, bucket string, fn func(context.Context) error) error {
+	if h.mutationGate == nil {
+		return fn(ctx)
+	}
+	lease, err := h.mutationGate.BeginTopologyChange(ctx, user, bucket)
+	if err != nil {
+		switch {
+		case errors.Is(err, store.ErrBucketHasActiveMutations):
+			return fmt.Errorf("%w: retry when the bucket is idle", dom.ErrBucketHasActiveMutations)
+		case errors.Is(err, store.ErrTopologyChangeInProgress):
+			return fmt.Errorf("%w: another topology change is in progress", dom.ErrTopologyChangeInProgress)
+		default:
+			return err
+		}
+	}
+	return lease.Run(ctx, fn)
+}
+
 func (h *policyHandlers) AddRouting(ctx context.Context, req *pb.AddRoutingRequest) (*emptypb.Empty, error) {
 	if err := h.credsSvc.HasUser(req.ToStorage, req.User); err != nil {
 		return nil, err
 	}
-	err := h.inUserLock(ctx, req.User, func() error {
-		if req.Bucket != nil && *req.Bucket != "" {
-			return h.policySvc.SetBucketRouting(ctx, entity.BucketRoutingPolicyID{
-				User:   req.User,
-				Bucket: *req.Bucket,
-			}, req.ToStorage)
-		}
-		return h.policySvc.SetUserRouting(ctx, req.User, req.ToStorage)
-	})
+	change := func(changeCtx context.Context) error {
+		return h.inUserLock(changeCtx, req.User, func() error {
+			if req.Bucket != nil && *req.Bucket != "" {
+				return h.policySvc.SetBucketRouting(changeCtx, entity.BucketRoutingPolicyID{
+					User:   req.User,
+					Bucket: *req.Bucket,
+				}, req.ToStorage)
+			}
+			return h.policySvc.SetUserRouting(changeCtx, req.User, req.ToStorage)
+		})
+	}
+	bucket := ""
+	if req.Bucket != nil {
+		bucket = *req.Bucket
+	}
+	err := h.withTopologyChange(ctx, req.User, bucket, change)
 	if err != nil {
 		return nil, err
 	}
@@ -745,15 +795,22 @@ func (h *policyHandlers) DeleteRouting(ctx context.Context, req *pb.RoutingID) (
 	if req.User == "" {
 		return nil, fmt.Errorf("%w: user is required", dom.ErrInvalidArg)
 	}
-	err := h.inUserLock(ctx, req.User, func() error {
-		if req.Bucket != nil && *req.Bucket != "" {
-			return h.policySvc.DeleteBucketRouting(ctx, entity.BucketRoutingPolicyID{
-				User:   req.User,
-				Bucket: *req.Bucket,
-			})
-		}
-		return h.policySvc.DeleteUserRouting(ctx, req.User)
-	})
+	change := func(changeCtx context.Context) error {
+		return h.inUserLock(changeCtx, req.User, func() error {
+			if req.Bucket != nil && *req.Bucket != "" {
+				return h.policySvc.DeleteBucketRouting(changeCtx, entity.BucketRoutingPolicyID{
+					User:   req.User,
+					Bucket: *req.Bucket,
+				})
+			}
+			return h.policySvc.DeleteUserRouting(changeCtx, req.User)
+		})
+	}
+	bucket := ""
+	if req.Bucket != nil {
+		bucket = *req.Bucket
+	}
+	err := h.withTopologyChange(ctx, req.User, bucket, change)
 	if err != nil {
 		return nil, err
 	}

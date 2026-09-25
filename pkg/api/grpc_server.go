@@ -202,6 +202,10 @@ func convertApiError(ctx context.Context, err error) error {
 		details = append(details, &errdetails.ErrorInfo{
 			Reason: err.Error(),
 		})
+	case errors.Is(err, dom.ErrBucketHasActiveMutations), errors.Is(err, dom.ErrTopologyChangeInProgress):
+		code = codes.Aborted
+		mappedErr = err
+		details = append(details, &errdetails.ErrorInfo{Reason: err.Error()})
 	case errors.Is(err, dom.ErrNotFound):
 		code = codes.NotFound
 		mappedErr = dom.ErrNotFound

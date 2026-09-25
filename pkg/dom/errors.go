@@ -24,15 +24,17 @@ import (
 )
 
 var (
-	ErrInternal             = errors.New("InternalError")
-	ErrNotImplemented       = errors.New("NotImplemented")
-	ErrInvalidStorageConfig = errors.New("InvalidStorageConfig")
-	ErrAlreadyExists        = errors.New("AlreadyExists")
-	ErrNotFound             = errors.New("NotFound")
-	ErrInvalidArg           = errors.New("InvalidArg")
-	ErrAuth                 = errors.New("AuthError")
-	ErrPolicy               = errors.New("PolicyError")
-	ErrRoutingBlock         = errors.New("RoutingBlockedError")
+	ErrInternal                 = errors.New("InternalError")
+	ErrNotImplemented           = errors.New("NotImplemented")
+	ErrInvalidStorageConfig     = errors.New("InvalidStorageConfig")
+	ErrAlreadyExists            = errors.New("AlreadyExists")
+	ErrNotFound                 = errors.New("NotFound")
+	ErrInvalidArg               = errors.New("InvalidArg")
+	ErrAuth                     = errors.New("AuthError")
+	ErrPolicy                   = errors.New("PolicyError")
+	ErrRoutingBlock             = errors.New("RoutingBlockedError")
+	ErrBucketHasActiveMutations = errors.New("BucketHasActiveMutations")
+	ErrTopologyChangeInProgress = errors.New("TopologyChangeInProgress")
 )
 
 func ErrCode(err error) int {

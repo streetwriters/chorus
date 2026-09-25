@@ -88,6 +88,7 @@ func Start(ctx context.Context, app dom.AppInfo, conf *Config) error {
 	lockRedis := util.NewRedis(conf.Redis, conf.Redis.LockDB)
 	defer lockRedis.Close()
 	objectLocker := store.NewObjectLocker(lockRedis, 0)
+	mutationGate := store.NewBucketMutationGate(lockRedis, 0)
 
 	confRedis := util.NewRedis(conf.Redis, conf.Redis.ConfigDB)
 	defer confRedis.Close()
@@ -113,7 +114,7 @@ func Start(ctx context.Context, app dom.AppInfo, conf *Config) error {
 		LogMiddleware:     log.HttpMiddleware(conf.Log, app.App, app.AppID, xctx.Event),
 		TraceMiddleware:   nil,
 		MetricsMiddleware: nil,
-		PolicyMiddleware:  router.PolicyMiddleware(policySvc),
+		PolicyMiddleware:  router.PolicyMiddleware(policySvc, mutationGate),
 	}
 	if conf.Metrics.Enabled {
 		proxyConfig.MetricsMiddleware = metrics.ProxyMiddleware()

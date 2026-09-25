@@ -19,27 +19,70 @@ import (
 	"fmt"
 	"net/http"
 
+	mclient "github.com/minio/minio-go/v7"
+
 	xctx "github.com/clyso/chorus/pkg/ctx"
 	"github.com/clyso/chorus/pkg/dom"
 	"github.com/clyso/chorus/pkg/policy"
+	"github.com/clyso/chorus/pkg/s3"
+	"github.com/clyso/chorus/pkg/store"
 	"github.com/clyso/chorus/pkg/util"
 )
 
-func PolicyMiddleware(policySvc policy.Service) func(next http.Handler) http.Handler {
+func PolicyMiddleware(policySvc policy.Service, gates ...*store.BucketMutationGate) func(next http.Handler) http.Handler {
+	var gate *store.BucketMutationGate
+	if len(gates) != 0 {
+		gate = gates[0]
+	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ctx := r.Context()
 			user := xctx.GetUser(ctx)
 			bucket := xctx.GetBucket(ctx)
 
-			policyCtx, err := initPolicyContext(ctx, policySvc, user, bucket)
-			if err != nil {
-				util.WriteError(ctx, w, err)
+			run := func(ctx context.Context) error {
+				policyCtx, err := initPolicyContext(ctx, policySvc, user, bucket)
+				if err != nil {
+					util.WriteError(ctx, w, err)
+					return nil
+				}
+				next.ServeHTTP(w, r.WithContext(policyCtx))
+				return nil
+			}
+			if gate == nil || !isObjectStateMutation(xctx.GetMethod(ctx)) || user == "" || bucket == "" {
+				_ = run(ctx)
 				return
 			}
-			ctx = policyCtx
-			next.ServeHTTP(w, r.WithContext(ctx))
+			lease, err := gate.BeginMutation(ctx, user, bucket)
+			if err != nil {
+				w.Header().Set("Retry-After", "1")
+				util.WriteError(ctx, w, mclient.ErrorResponse{
+					Code:       "ServiceUnavailable",
+					Message:    "Object mutations are temporarily unavailable. Retry the request.",
+					StatusCode: http.StatusServiceUnavailable,
+				})
+				return
+			}
+			if err := lease.Run(ctx, run); err != nil {
+				w.Header().Set("Retry-After", "1")
+				util.WriteError(ctx, w, mclient.ErrorResponse{
+					Code:       "ServiceUnavailable",
+					Message:    "Object mutations are temporarily unavailable. Retry the request.",
+					StatusCode: http.StatusServiceUnavailable,
+				})
+			}
 		})
+	}
+}
+
+func isObjectStateMutation(method s3.Method) bool {
+	switch method {
+	case s3.PutObject, s3.CopyObject, s3.DeleteObject, s3.DeleteObjects,
+		s3.CompleteMultipartUpload, s3.PutObjectAcl, s3.PutObjectTagging,
+		s3.DeleteObjectTagging, s3.PutObjectRetention, s3.PutObjectLegalHold:
+		return true
+	default:
+		return false
 	}
 }
 

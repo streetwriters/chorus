@@ -124,6 +124,7 @@ func Start(ctx context.Context, app dom.AppInfo, conf *Config) error {
 	userLocker := store.NewUserLocker(lockRedis, conf.Lock.Overlap)
 	objectLocker := store.NewObjectLocker(lockRedis, conf.Lock.Overlap)
 	bucketLocker := store.NewBucketLocker(lockRedis, conf.Lock.Overlap)
+	mutationGate := store.NewBucketMutationGate(lockRedis, 0)
 
 	objectVersionInfoStore := store.NewObjectVersionInfoStore(confRedis)
 	copySvc := copy.NewS3CopySvc(credsSvc, clientRegistry, metricsSvc)
@@ -271,7 +272,7 @@ func Start(ctx context.Context, app dom.AppInfo, conf *Config) error {
 		if conf.Api.Webhook.Enabled {
 			webhookConf = &conf.Api.Webhook
 		}
-		policyHandler := api.PolicyHandlers(credsSvc, clientRegistry, queueSvc, policySvc, versionSvc, objectListStateStore, bucketListStateStore, notifications.NewService(clientRegistry), replicationStatusLocker, userLocker, webhookConf)
+		policyHandler := api.PolicyHandlers(credsSvc, clientRegistry, queueSvc, policySvc, versionSvc, objectListStateStore, bucketListStateStore, notifications.NewService(clientRegistry), replicationStatusLocker, userLocker, webhookConf, mutationGate)
 
 		webhookEnabled := conf.Api.Webhook.Enabled
 		webhookOnSeparatePorts := webhookEnabled && conf.Api.Webhook.GrpcPort > 0
