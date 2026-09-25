@@ -93,7 +93,7 @@ const (
 	CSwiftImage = "ghcr.io/aiivashchenko/docker-swift:2.37.0"
 	CSwiftPort  = 8080
 
-	CMinioImage          = "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z-cpuv1"
+	CMinioImage          = "ghcr.io/coollabsio/minio:RELEASE.2025-10-15T17-29-55Z"
 	CMinioUsername       = "minioadmin"
 	CMinioPassword       = "minioadmin"
 	CMinioS3Port         = 9000
