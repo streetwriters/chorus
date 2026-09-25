@@ -18,9 +18,12 @@ package router
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/xml"
+	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -57,6 +60,8 @@ func (r *s3Router) createMultipartUpload(req *http.Request) (resp *http.Response
 		zerolog.Ctx(ctx).Err(err).Msg("unable to unmarshal initiateMultipartUploadResult response body")
 		return
 	}
+	providerUploadID := respBody.UploadID
+	respBody.UploadID = encodeProxyUploadID(storage, providerUploadID)
 	id := entity.NewUserUploadObjectID(user, bucket)
 	val := entity.NewUserUploadObject(object, respBody.UploadID, storage)
 	val.StartedAt = time.Now().UTC()
@@ -66,6 +71,15 @@ func (r *s3Router) createMultipartUpload(req *http.Request) (resp *http.Response
 		ttl = inProgressSwitch.MultipartTTL
 	}
 	err = r.uploadSvc.StoreUpload(ctx, id, val, ttl)
+	if err == nil {
+		var body []byte
+		body, err = xml.Marshal(respBody)
+		if err == nil {
+			resp.Body = io.NopCloser(bytes.NewReader(body))
+			resp.ContentLength = int64(len(body))
+			resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
+		}
+	}
 
 	return
 }
@@ -194,6 +208,7 @@ func multipartRetryMatches(upload *entity.UserUploadObject, info mclient.ObjectI
 func (r *s3Router) abortMultipartUpload(req *http.Request) (resp *http.Response, storage string, isApiErr bool, err error) {
 	ctx := req.Context()
 	user, bucket, object := xctx.GetUser(ctx), xctx.GetBucket(ctx), xctx.GetObject(ctx)
+	clientUploadID := req.URL.Query().Get("uploadId")
 	storage, _, err = r.routeMultipart(req)
 	if err != nil {
 		return
@@ -208,7 +223,7 @@ func (r *s3Router) abortMultipartUpload(req *http.Request) (resp *http.Response,
 		return
 	}
 	if trackedUpload, lookupErr := r.uploadSvc.GetUpload(ctx,
-		entity.NewUserUploadObjectID(user, bucket), object, req.URL.Query().Get("uploadId")); lookupErr == nil && trackedUpload != nil {
+		entity.NewUserUploadObjectID(user, bucket), object, clientUploadID); lookupErr == nil && trackedUpload != nil {
 		_ = r.uploadSvc.DeleteUpload(ctx, entity.NewUserUploadObjectID(user, bucket), *trackedUpload)
 	}
 	return
@@ -226,6 +241,9 @@ func (r *s3Router) listMultipartUploads(req *http.Request) (resp *http.Response,
 		return nil, "", false, err
 	}
 	resp, isApiErr, err = client.Do(req)
+	if err == nil && !isApiErr {
+		err = rewriteMultipartListIDs(resp, storage)
+	}
 	return
 }
 
@@ -254,6 +272,15 @@ func (r *s3Router) routeMultipart(req *http.Request) (storage string, switchInPr
 	if err != nil {
 		return storage, false, err
 	}
+	if providerStorage, providerUploadID, ok := decodeProxyUploadID(val.UploadID); ok {
+		if trackedUpload != nil && trackedUpload.Storage != "" && trackedUpload.Storage != providerStorage {
+			return storage, false, fmt.Errorf("multipart upload provider does not match its tracking marker")
+		}
+		query := req.URL.Query()
+		query.Set("uploadId", providerUploadID)
+		req.URL.RawQuery = query.Encode()
+		return providerStorage, xctx.GetInProgressZeroDowntime(ctx) != nil, nil
+	}
 
 	inProgressSwitch := xctx.GetInProgressZeroDowntime(ctx)
 	if inProgressSwitch == nil {
@@ -281,6 +308,14 @@ func (r *s3Router) routeMultipart(req *http.Request) (storage string, switchInPr
 func (r *s3Router) routeListMultipart(req *http.Request) (storage string, err error) {
 	ctx := req.Context()
 	storage = xctx.GetRoutingPolicy(ctx)
+	query := req.URL.Query()
+	if marker := query.Get("upload-id-marker"); marker != "" {
+		if markerStorage, providerUploadID, ok := decodeProxyUploadID(marker); ok {
+			query.Set("upload-id-marker", providerUploadID)
+			req.URL.RawQuery = query.Encode()
+			return markerStorage, nil
+		}
+	}
 
 	inProgressSwitch := xctx.GetInProgressZeroDowntime(ctx)
 	if inProgressSwitch == nil {
@@ -303,4 +338,81 @@ func (r *s3Router) routeListMultipart(req *http.Request) (storage string, err er
 	// route to old storage
 	oldReplicationID := inProgressSwitch.ReplicationID()
 	return oldReplicationID.FromStorage(), nil
+}
+
+const proxyUploadIDPrefix = "chorus-mpu-v1."
+
+func encodeProxyUploadID(storage, providerUploadID string) string {
+	payload := storage + "\x00" + providerUploadID
+	return proxyUploadIDPrefix + base64.RawURLEncoding.EncodeToString([]byte(payload))
+}
+
+func decodeProxyUploadID(uploadID string) (storage, providerUploadID string, ok bool) {
+	if !strings.HasPrefix(uploadID, proxyUploadIDPrefix) {
+		return "", "", false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(uploadID, proxyUploadIDPrefix))
+	if err != nil {
+		return "", "", false
+	}
+	storage, providerUploadID, ok = strings.Cut(string(payload), "\x00")
+	return storage, providerUploadID, ok && storage != "" && providerUploadID != ""
+}
+
+type multipartListResult struct {
+	XMLName            xml.Name                `xml:"ListMultipartUploadsResult"`
+	Bucket             string                  `xml:"Bucket"`
+	KeyMarker          string                  `xml:"KeyMarker"`
+	UploadIDMarker     string                  `xml:"UploadIdMarker"`
+	NextKeyMarker      string                  `xml:"NextKeyMarker"`
+	NextUploadIDMarker string                  `xml:"NextUploadIdMarker"`
+	Prefix             string                  `xml:"Prefix"`
+	Delimiter          string                  `xml:"Delimiter,omitempty"`
+	EncodingType       string                  `xml:"EncodingType,omitempty"`
+	MaxUploads         int                     `xml:"MaxUploads"`
+	IsTruncated        bool                    `xml:"IsTruncated"`
+	Uploads            []multipartListEntry    `xml:"Upload"`
+	CommonPrefixes     []multipartCommonPrefix `xml:"CommonPrefixes,omitempty"`
+}
+
+type multipartListEntry struct {
+	Key          string                `xml:"Key"`
+	UploadID     string                `xml:"UploadId"`
+	Initiator    multipartListIdentity `xml:"Initiator"`
+	Owner        multipartListIdentity `xml:"Owner"`
+	StorageClass string                `xml:"StorageClass"`
+	Initiated    string                `xml:"Initiated"`
+}
+
+type multipartListIdentity struct {
+	ID          string `xml:"ID"`
+	DisplayName string `xml:"DisplayName"`
+}
+
+type multipartCommonPrefix struct {
+	Prefix string `xml:"Prefix"`
+}
+
+func rewriteMultipartListIDs(resp *http.Response, storage string) error {
+	var result multipartListResult
+	if err := s3client.ExtractRespBody(resp, &result); err != nil {
+		return fmt.Errorf("unable to parse multipart upload listing: %w", err)
+	}
+	for i := range result.Uploads {
+		result.Uploads[i].UploadID = encodeProxyUploadID(storage, result.Uploads[i].UploadID)
+	}
+	if result.UploadIDMarker != "" {
+		result.UploadIDMarker = encodeProxyUploadID(storage, result.UploadIDMarker)
+	}
+	if result.NextUploadIDMarker != "" {
+		result.NextUploadIDMarker = encodeProxyUploadID(storage, result.NextUploadIDMarker)
+	}
+	body, err := xml.Marshal(result)
+	if err != nil {
+		return fmt.Errorf("unable to serialize multipart upload listing: %w", err)
+	}
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+	resp.ContentLength = int64(len(body))
+	resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
+	return nil
 }

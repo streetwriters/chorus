@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/xml"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -21,6 +22,7 @@ import (
 	"github.com/clyso/chorus/pkg/objstore"
 	"github.com/clyso/chorus/pkg/ratelimit"
 	"github.com/clyso/chorus/pkg/s3"
+	"github.com/clyso/chorus/pkg/s3client"
 	"github.com/clyso/chorus/pkg/storage"
 	"github.com/clyso/chorus/pkg/store"
 	"github.com/clyso/chorus/pkg/tasks"
@@ -30,6 +32,39 @@ import (
 type multipartRetryReplicator struct {
 	calls     atomic.Int32
 	failFirst bool
+}
+
+func TestProxyMultipartUploadIDIsProviderScoped(t *testing.T) {
+	r := require.New(t)
+	mainID := encodeProxyUploadID("main", "1")
+	followerID := encodeProxyUploadID("follower", "1")
+	r.NotEqual(mainID, followerID, "separate S3 providers may issue the same upload ID")
+
+	storage, uploadID, ok := decodeProxyUploadID(followerID)
+	r.True(ok)
+	r.Equal("follower", storage)
+	r.Equal("1", uploadID)
+	_, _, ok = decodeProxyUploadID(proxyUploadIDPrefix + "not-valid-base64!")
+	r.False(ok)
+}
+
+func TestRewriteMultipartListUsesProviderScopedIDs(t *testing.T) {
+	r := require.New(t)
+	resp := &http.Response{
+		Body:   io.NopCloser(strings.NewReader(`<ListMultipartUploadsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Bucket>bucket</Bucket><UploadIdMarker>1</UploadIdMarker><NextUploadIdMarker>2</NextUploadIdMarker><Upload><Key>object</Key><UploadId>2</UploadId><Initiator><ID>user</ID></Initiator><Owner><ID>user</ID></Owner><StorageClass>STANDARD</StorageClass><Initiated>2026-01-01T00:00:00Z</Initiated></Upload></ListMultipartUploadsResult>`)),
+		Header: make(http.Header),
+	}
+	r.NoError(rewriteMultipartListIDs(resp, "follower"))
+	var result multipartListResult
+	r.NoError(s3client.ExtractRespBody(resp, &result))
+	storage, uploadID, ok := decodeProxyUploadID(result.Uploads[0].UploadID)
+	r.True(ok)
+	r.Equal("follower", storage)
+	r.Equal("2", uploadID)
+	storage, uploadID, ok = decodeProxyUploadID(result.NextUploadIDMarker)
+	r.True(ok)
+	r.Equal("follower", storage)
+	r.Equal("2", uploadID)
 }
 
 func (r *multipartRetryReplicator) Replicate(context.Context, string, tasks.ReplicationTask) error {
@@ -147,13 +182,16 @@ func TestCompleteMultipartUploadCanRetryAfterQueueFailure(t *testing.T) {
 	initResponse := httptest.NewRecorder()
 	handler.ServeHTTP(initResponse, initRequest)
 	r.Equal(http.StatusOK, initResponse.Code, initResponse.Body.String())
-	tracked, err := uploads.GetUpload(t.Context(), uploadID, "object", "upload-1")
+	var initiated initiateMultipartUploadResult
+	r.NoError(xml.Unmarshal(initResponse.Body.Bytes(), &initiated))
+	r.NotEqual("upload-1", initiated.UploadID, "the proxy exposes a provider-namespaced opaque ID")
+	tracked, err := uploads.GetUpload(t.Context(), uploadID, "object", initiated.UploadID)
 	r.NoError(err)
 	r.NotNil(tracked, "multipart initiation during ordinary replication must be recorded for completion retry recovery")
 	r.Equal("b", tracked.Storage)
 
-	requestFor := func(objectName string) *http.Request {
-		req := httptest.NewRequest(http.MethodPost, backend.URL+"/bucket/"+objectName+"?uploadId=upload-1", strings.NewReader(`<CompleteMultipartUpload/>`))
+	requestFor := func(objectName, uploadID string) *http.Request {
+		req := httptest.NewRequest(http.MethodPost, backend.URL+"/bucket/"+objectName+"?uploadId="+uploadID, strings.NewReader(`<CompleteMultipartUpload/>`))
 		ctx := xctx.SetUser(req.Context(), "user")
 		ctx = xctx.SetBucket(ctx, "bucket")
 		ctx = xctx.SetObject(ctx, objectName)
@@ -162,7 +200,7 @@ func TestCompleteMultipartUploadCanRetryAfterQueueFailure(t *testing.T) {
 		ctx = xctx.SetReplications(ctx, []entity.UniversalReplicationID{replicationID})
 		return req.WithContext(ctx)
 	}
-	request := func() *http.Request { return requestFor("object") }
+	request := func() *http.Request { return requestFor("object", initiated.UploadID) }
 	routed, _, err := router.routeMultipart(request())
 	r.NoError(err)
 	r.Equal("b", routed, "multipart retries stay pinned to the initiating provider")
@@ -170,7 +208,7 @@ func TestCompleteMultipartUploadCanRetryAfterQueueFailure(t *testing.T) {
 	first := httptest.NewRecorder()
 	handler.ServeHTTP(first, request())
 	r.Equal(http.StatusServiceUnavailable, first.Code, "backend completion succeeds, but failed event storage must be retryable")
-	tracked, err = uploads.GetUpload(t.Context(), uploadID, "object", "upload-1")
+	tracked, err = uploads.GetUpload(t.Context(), uploadID, "object", initiated.UploadID)
 	r.NoError(err)
 	r.NotNil(tracked, "keep the upload marker until the object event is durably queued")
 
@@ -183,7 +221,7 @@ func TestCompleteMultipartUploadCanRetryAfterQueueFailure(t *testing.T) {
 	r.Equal(int32(2), completeCalls.Load(), "the retry receives NoSuchUpload after the first completion")
 	r.Greater(headCalls.Load(), int32(0), "a retry must verify the final object with HEAD before treating completion as successful")
 	r.Equal(int32(4), replicator.calls.Load(), "retry re-enqueues object, ACL, and tag work")
-	tracked, err = uploads.GetUpload(t.Context(), uploadID, "object", "upload-1")
+	tracked, err = uploads.GetUpload(t.Context(), uploadID, "object", initiated.UploadID)
 	r.NoError(err)
 	r.NotNil(tracked, "successful completion metadata remains available through its bounded TTL")
 	r.True(tracked.CompletionRecorded)
@@ -197,7 +235,7 @@ func TestCompleteMultipartUploadCanRetryAfterQueueFailure(t *testing.T) {
 	wrongUpload, err := uploads.GetUpload(t.Context(), uploadID, "object", "another-upload")
 	r.NoError(err)
 	r.Nil(wrongUpload, "a different upload ID cannot use the completion marker")
-	wrongKey, err := uploads.GetUpload(t.Context(), uploadID, "another-object", "upload-1")
+	wrongKey, err := uploads.GetUpload(t.Context(), uploadID, "another-object", initiated.UploadID)
 	r.NoError(err)
 	r.Nil(wrongKey, "a different object key cannot use the completion marker")
 
@@ -208,11 +246,11 @@ func TestCompleteMultipartUploadCanRetryAfterQueueFailure(t *testing.T) {
 	r.Equal(http.StatusOK, lostResponse.Code)
 	r.Equal(int32(3), completeCalls.Load())
 	r.Equal(int32(7), replicator.calls.Load(), "response-loss retry recreates durable replication intent")
-	tracked, err = uploads.GetUpload(t.Context(), uploadID, "object", "upload-1")
+	tracked, err = uploads.GetUpload(t.Context(), uploadID, "object", initiated.UploadID)
 	r.NoError(err)
 	r.NotNil(tracked)
 
-	abort := httptest.NewRequest(http.MethodDelete, backend.URL+"/bucket/object?uploadId=upload-1", nil)
+	abort := httptest.NewRequest(http.MethodDelete, backend.URL+"/bucket/object?uploadId="+initiated.UploadID, nil)
 	abortCtx := xctx.SetUser(abort.Context(), "user")
 	abortCtx = xctx.SetBucket(abortCtx, "bucket")
 	abortCtx = xctx.SetObject(abortCtx, "object")
@@ -220,7 +258,7 @@ func TestCompleteMultipartUploadCanRetryAfterQueueFailure(t *testing.T) {
 	abort = abort.WithContext(abortCtx)
 	_, _, _, err = router.abortMultipartUpload(abort)
 	r.NoError(err)
-	tracked, err = uploads.GetUpload(t.Context(), uploadID, "object", "upload-1")
+	tracked, err = uploads.GetUpload(t.Context(), uploadID, "object", initiated.UploadID)
 	r.NoError(err)
 	r.Nil(tracked, "explicit abort removes the retained completion marker")
 
@@ -237,18 +275,20 @@ func TestCompleteMultipartUploadCanRetryAfterQueueFailure(t *testing.T) {
 	init2Response := httptest.NewRecorder()
 	handler.ServeHTTP(init2Response, init2)
 	r.Equal(http.StatusOK, init2Response.Code, init2Response.Body.String())
+	var initiated2 initiateMultipartUploadResult
+	r.NoError(xml.Unmarshal(init2Response.Body.Bytes(), &initiated2))
 
 	firstCompletionResponseLost := httptest.NewRecorder()
-	handler.ServeHTTP(firstCompletionResponseLost, requestFor("object-2"))
+	handler.ServeHTTP(firstCompletionResponseLost, requestFor("object-2", initiated2.UploadID))
 	r.Equal(http.StatusOK, firstCompletionResponseLost.Code)
 	// Discard firstCompletionResponseLost to simulate the network dropping 200.
 
 	retryAfterLostResponse := httptest.NewRecorder()
-	handler.ServeHTTP(retryAfterLostResponse, requestFor("object-2"))
+	handler.ServeHTTP(retryAfterLostResponse, requestFor("object-2", initiated2.UploadID))
 	r.Equal(http.StatusOK, retryAfterLostResponse.Code, retryAfterLostResponse.Body.String())
 	r.Equal(int32(5), completeCalls.Load())
 	r.Equal(int32(13), replicator.calls.Load())
-	tracked, err = uploads.GetUpload(t.Context(), uploadID, "object-2", "upload-1")
+	tracked, err = uploads.GetUpload(t.Context(), uploadID, "object-2", initiated2.UploadID)
 	r.NoError(err)
 	r.NotNil(tracked, "successful completion receipt survives event enqueue and a lost client response")
 }

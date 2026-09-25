@@ -63,6 +63,7 @@ type deleteObjectsRequest struct {
 }
 
 type initiateMultipartUploadResult struct {
+	XMLName  xml.Name `xml:"InitiateMultipartUploadResult"`
 	Bucket   string
 	Key      string
 	UploadID string `xml:"UploadId"`
