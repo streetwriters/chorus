@@ -11,7 +11,7 @@ require (
 	github.com/sirupsen/logrus v1.10.1
 	github.com/wcharczuk/go-chart/v2 v2.1.2
 	golang.org/x/sync v0.22.0
-	google.golang.org/grpc v1.83.1
+	google.golang.org/grpc v1.83.2
 )
 
 require (
