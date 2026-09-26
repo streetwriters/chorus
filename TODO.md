@@ -201,3 +201,36 @@ Accepted limitations still apply: multipart provider success followed by a proce
 - Delete/object concurrency stress passed: `go test ./service/proxy/router -run 'DeleteObjects|ProxyDeleteSerializesWithWorkerObjectCopy' -count=20`.
 - Race detector passed: matching `go test -race` commands for `pkg/store`, `service/proxy/router`, and `pkg/api`, each with `-count=3`.
 - Formatting and whitespace checks passed: `gofmt -d` on all modified/new Go sources produced no output; `git diff --check` passed.
+
+## Presigned empty Content-Type, switched diff, and transfer timeout follow-up — 2026-09-26
+
+- [x] Treat an empty `Content-Type` as absent when forwarding/re-signing an otherwise unsigned S3 request; preserve validation of every header named by SigV4 `SignedHeaders`. Non-empty unsigned `Content-Type` remains rejected; signed empty values are still included in signature verification.
+- [x] Add end-to-end regression for AWSSDK.S3 3.7.310.8 presigned PUT using the released web client request shape (`Content-Type: ""`); assert SigV4 query fields, emitted empty header, successful Proxy response, and persisted object content.
+- [x] Add end-to-end regression for AWSSDK.S3 3.7.310.8 presigned multipart UploadPart with `Content-Type: ""`; use direct-provider multipart initiation/completion, assert the emitted header, successful part upload, and completed object contents.
+- [ ] Verify with the released Notesnook client application itself. `/Applications/Notesnook.app` is version `3.4.6` (bundle build `240`); the sibling source checkout is newer than this binary. I did not sign in or redirect this installed app because it is configured for a real API/account and this workspace has no isolated Notesnook test account/API. The AWSSDK harness reproduces the observed request shape, but is not a released-client runtime test.
+- [x] Fix completed diff reruns and add regression coverage for reusing the same deterministic locations after the completed Asynq queue/report; active checks remain protected. Direct MinIO-backed diff integration rerun passed. Earlier live recovery evidence recorded above also documents the stale historic report and direct inventory checks.
+- [x] Set the backend HTTP timeout based on a 5 GiB Notesnook maximum object and a 1 MiB/s minimum expected rate: about 86 minutes transfer time, with a 2-hour timeout leaving overhead. Add default-value coverage and align example deployment overrides. Explicit storage timeouts remain operator-controlled.
+- [x] Run focused auth, s3client, diff, timeout, Notesnook/MinIO integration, and broad package tests. Exact current-pass commands/results follow.
+- [x] Final review: only an empty unsigned `Content-Type` is treated as absent; all `SignedHeaders` remain verified; non-empty unsigned values remain rejected and are documented as a separate compatibility decision.
+
+### Commands and outcomes
+
+- `go test ./pkg/s3 ./pkg/s3client ./service/proxy/auth -count=1` — PASS.
+- `go test ./service/proxy/auth -run TestDoesPresignedSignatureV4Match -count=1` — PASS, including empty signed-header mutation rejection.
+- `go test ./service/worker/handler -run 'TestStartDiff' -count=1` — PASS.
+- `go test ./pkg/... ./service/... -timeout=180s` — PASS across all package and service packages.
+- `go test ./test/minio -run '^Test_e2e_proxy_presigned_sigv4$' -count=1 -v` — PASS with Docker access; the AWSSDK 3.7.310.8 GET, PUT, and UploadPart cases ran. PUT and part requests explicitly emitted `Content-Type: ""`, the PUT object was read back, and the multipart object was completed and read back.
+- `go test ./test/minio -count=1` — PASS with Docker access (`ok github.com/clyso/chorus/test/minio 17.322s`).
+- `go test ./test/diff -ginkgo.focus='For minio unversioned buckets Should succeed' -count=1` — PASS with Docker access; this includes a second completed diff for the same location pair.
+- An initial `go test ./test/minio -count=1` without escalation failed before test setup because the sandbox denied access to `/var/run/docker.sock` and `~/.docker/run/docker.sock`. The focused MinIO test was rerun with Docker access and passed; this is an environment permission failure, not a test failure.
+- `git diff --check` — PASS.
+
+### Final adversarial review
+
+- Invariant: unsigned empty Content-Type does not invalidate an otherwise valid presigned upload, while signed material remains protected. Attack: send host-only-signed PUT with an explicitly empty Content-Type, then change to non-empty; the empty request passes and the changed signed empty case fails signature validation. Tests: `pkg/s3`, `service/proxy/auth`, and AWSSDK/MinIO integration above. Limitation: an unsigned non-empty content type still fails; this is intentional because it can alter stored metadata.
+- Invariant: Proxy does not forward an empty metadata header to the storage provider. Attack: capture the outgoing request after an incoming empty header. Test: `pkg/s3client` header-processing and HTTP-wire regressions passed. Limitation: content-type behavior for a non-empty unsigned header remains unchanged/rejected at auth.
+- Invariant: completed diff reports do not prevent a fresh consistency check for the same deterministic pair, and an active check is not replaced. Attack: rerun after queue removal; separately retry while queue has outstanding work. Tests: handler unit regressions and MinIO-backed diff integration passed. Limitation: the old live lab's historical false report still requires a fresh diff; direct inventories remain valid independent evidence if a CLI report is stale.
+- Invariant: large supported Notesnook transfers are not cut off by the default backend timeout at the stated minimum rate. Attack: size the slowest expected 5 GiB transfer at 1 MiB/s and compare against the configured timeout. Test: timeout default config test passed. Limitation: this is a sizing bound, not a throughput guarantee; deployments below 1 MiB/s or with higher configured `httpTimeout` requirements must set an explicit value.
+- Released application verification remains outstanding: the installed binary could not safely be redirected to this isolated test environment without an isolated API/account. Do not describe the harness test as proof that the binary itself was run.
+
+Initial findings before implementation: the earlier reproduction showed an additional backend error after forcing SigV4 when the HTTP client sends a non-empty `Content-Type`. Notesnook web source uses an explicitly empty header for single and multipart uploads (`../notesnook/apps/web/src/interfaces/fs.ts`); the API source sets `AWSConfigsS3.UseSignatureVersion4 = true` and configures the presigner with `ServiceURL` and `AuthenticationRegion`.
