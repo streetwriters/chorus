@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/hibiken/asynq"
@@ -460,8 +461,14 @@ func (r *DiffSvc) GetDiffStatus(ctx context.Context, id entity.DiffID) (entity.D
 	}
 
 	diffQueueStats, err := r.queueSvc.Stats(ctx, diffQueue)
-	if err != nil {
+	if err != nil && !errors.Is(err, dom.ErrNotFound) {
 		return entity.DiffStatus{}, fmt.Errorf("unable to get diff queue stats: %w", err)
+	}
+	if diffQueueStats == nil {
+		// Asynq removes an empty queue after its last task is consumed. A saved
+		// diff report can outlive that queue, so absence means there is no
+		// remaining work rather than a failed diff lookup.
+		diffQueueStats = &tasks.QueueStats{}
 	}
 
 	ready := diffQueueStats.Unprocessed == 0
@@ -550,6 +557,30 @@ func (r *DiffSvc) GetDiffReportEntries(ctx context.Context, id entity.DiffID, cu
 }
 
 func (r *DiffSvc) StartDiff(ctx context.Context, id entity.DiffID, settings entity.DiffSettings) error {
+	// Diff IDs are deterministic from their locations. Allow a completed check
+	// to be rerun in place so a post-switch inventory does not fail merely
+	// because an older report for the same buckets remains in Redis.
+	existing, err := r.idStore.Get(ctx, struct{}{})
+	if err != nil && !errors.Is(err, dom.ErrNotFound) {
+		return fmt.Errorf("unable to list existing diff checks: %w", err)
+	}
+	for _, existingID := range existing {
+		if !slices.Equal(existingID.Locations, id.Locations) {
+			continue
+		}
+		status, err := r.GetDiffStatus(ctx, id)
+		if err != nil {
+			return fmt.Errorf("unable to check existing diff status: %w", err)
+		}
+		if !status.Check.Queue.Ready || (status.FixQueue != nil && !status.FixQueue.Ready) {
+			return errors.New("diff check for these locations is still in progress")
+		}
+		if err := r.DeleteDiff(ctx, id); err != nil {
+			return fmt.Errorf("unable to remove completed diff before rerun: %w", err)
+		}
+		break
+	}
+
 	if err := r.RegisterDiff(ctx, id, settings); err != nil {
 		return fmt.Errorf("unable to register diff: %w", err)
 	}

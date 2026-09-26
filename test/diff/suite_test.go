@@ -715,6 +715,18 @@ var _ = Describe("Diff scenarious", Ordered, func() {
 				Expect(getCheckResponse.Check.IgnoreSizes).To(BeFalse())
 				Expect(getCheckResponse.Check.Versioned).To(BeFalse())
 
+				// A post-switch verification commonly reruns the same deterministic
+				// location pair. The earlier completed report must not make the
+				// fresh diff check fail as a duplicate.
+				_, err = diffClient.Start(ctx, checkRequest)
+				Expect(err).NotTo(HaveOccurred())
+				Eventually(func(g Gomega) {
+					getCheckResponse, err = diffClient.GetReport(ctx, &pb.DiffCheckRequest{Locations: locations})
+					g.Expect(err).NotTo(HaveOccurred())
+					g.Expect(getCheckResponse.Check.Ready).To(BeTrue())
+				}, 1*time.Minute, time.Millisecond*100).Should(Succeed())
+				Expect(getCheckResponse.Check.Consistent).To(BeTrue())
+
 				checkEntries, err := diffClient.GetReportEntries(ctx, &pb.GetDiffCheckReportEntriesRequest{
 					Locations: locations,
 					PageSize:  10,
