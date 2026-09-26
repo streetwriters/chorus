@@ -34,7 +34,7 @@ storage:
 #      provider: <Ceph|Minio|Other> # S3 provider name. Required to use provider-specific APIs, like keeping original versionID. Use 'Other' if your storage is S3 compatible but not listed.
 #      isMain: true # <true|false> one of the storages in should be main
 #      healthCheckInterval: 10s
-#      httpTimeout: 1m
+#      httpTimeout: 2h # supports Notesnook's 5 GiB maximum at 1 MiB/s with headroom
 #      isSecure: true #set false for http address
 #      rateLimit:
 #        enable: true
@@ -51,7 +51,7 @@ storage:
 #      provider: <Ceph|Minio|Other> # S3 provider name. Required to use provider-specific APIs, like keeping original versionID. Use 'Other' if your storage is S3 compatible but not listed.
 #      isMain: false # <true|false> one of the storages in should be main
 #      healthCheckInterval: 10s
-#      httpTimeout: 1m
+#      httpTimeout: 2h # supports Notesnook's 5 GiB maximum at 1 MiB/s with headroom
 #      isSecure: true #set false for http address
 #      rateLimit:
 #        enable: true

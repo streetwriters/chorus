@@ -2,6 +2,7 @@ package s3
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -95,6 +96,7 @@ func TestStorageConfig_ValidateTimeout(t *testing.T) {
 			Credentials: map[string]CredentialsV4{"user": {"1", "2"}}}
 		r.NoError(s.Validate())
 		r.EqualValues(defaultHttpTimeout, s.HttpTimeout)
+		r.Equal(2*time.Hour, s.HttpTimeout)
 	})
 	t.Run("default ignored if set", func(t *testing.T) {
 		r := require.New(t)

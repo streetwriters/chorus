@@ -27,7 +27,10 @@ import (
 )
 
 const (
-	defaultHttpTimeout = time.Minute * 10
+	// Notesnook allows 5 GiB objects. At a minimum expected throughput of
+	// 1 MiB/s, a full transfer takes about 86 minutes; 2 hours leaves room for
+	// network/provider overhead without timing out an otherwise valid upload.
+	defaultHttpTimeout = time.Hour * 2
 )
 
 // Provider defines the S3 storage provider type

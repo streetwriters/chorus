@@ -67,7 +67,7 @@ storage:
     #   isSecure: true
     #   defaultRegion: "us-east-1"
     #   healthCheckInterval: 10s
-    #   httpTimeout: 1m
+    #   httpTimeout: 2h # supports Notesnook's 5 GiB maximum at 1 MiB/s with headroom
     #   rateLimit:
     #     enabled: false
     #     rpm: 60

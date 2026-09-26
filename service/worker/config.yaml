@@ -45,7 +45,7 @@ storage:
   #     address: clyso.com
   #     defaultRegion: ""
   #     healthCheckInterval: 5s
-  #     httpTimeout: 10m0s
+  #     httpTimeout: 2h # supports Notesnook's 5 GiB maximum at 1 MiB/s with headroom
   #     # example credentials for OpenStack Swift storage
   #   my_swift_storage: # uniq storage alias to refer in chorus API. Can be any lowercase string
   #     type: SWIFT # [REQUIRED] storage type: S3 or SWIFT
