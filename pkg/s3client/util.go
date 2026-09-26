@@ -281,6 +281,12 @@ func processHeaders(origin http.Header) (toSign http.Header, notToSign http.Head
 	// process headers
 	toSign, notToSign = http.Header{}, http.Header{}
 	for name, vals := range origin {
+		if strings.EqualFold(name, "Content-Type") && hasOnlyEmptyValues(vals) {
+			// Empty Content-Type carries no object metadata. Do not send it to
+			// storage: S3 backends may reject a present header omitted from the
+			// proxy's canonical signature.
+			continue
+		}
 		if name == "Authorization" || name == "X-Amz-Date" {
 			// remove from request
 			continue
@@ -313,4 +319,13 @@ func processHeaders(origin http.Header) (toSign http.Header, notToSign http.Head
 		}
 	}
 	return
+}
+
+func hasOnlyEmptyValues(values []string) bool {
+	for _, value := range values {
+		if value != "" {
+			return false
+		}
+	}
+	return true
 }

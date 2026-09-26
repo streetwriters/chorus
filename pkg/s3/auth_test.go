@@ -33,6 +33,16 @@ func TestExtractSignedHeadersRejectsUnsignedHeaders(t *testing.T) {
 			wantErr:       true,
 		},
 		{
+			name:          "empty content type is absent when unsigned",
+			signedHeaders: []string{"host"},
+			headers:       http.Header{"Content-Type": {""}},
+		},
+		{
+			name:          "empty content type remains validated when signed",
+			signedHeaders: []string{"content-type", "host"},
+			headers:       http.Header{"Content-Type": {""}},
+		},
+		{
 			name:          "amz header is present but not signed",
 			signedHeaders: []string{"host"},
 			headers:       http.Header{"X-Amz-Meta-Foo": {"bar"}},

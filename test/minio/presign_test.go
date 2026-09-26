@@ -51,6 +51,10 @@ func bucketName(name string) string {
 }
 
 func doRequest(t *testing.T, method string, u *url.URL, body string) (int, http.Header, string) {
+	return doRequestWithHeaders(t, method, u, body, nil)
+}
+
+func doRequestWithHeaders(t *testing.T, method string, u *url.URL, body string, headers http.Header) (int, http.Header, string) {
 	t.Helper()
 	var reader io.Reader
 	if body != "" {
@@ -58,6 +62,9 @@ func doRequest(t *testing.T, method string, u *url.URL, body string) (int, http.
 	}
 	req, err := http.NewRequestWithContext(t.Context(), method, u.String(), reader)
 	require.NoError(t, err)
+	for key, values := range headers {
+		req.Header[key] = values
+	}
 	res, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer res.Body.Close()
@@ -167,29 +174,47 @@ func Test_e2e_proxy_presigned_sigv4(t *testing.T) {
 		_, err := minioClient.PutObject(ctx, bucket, getKey, strings.NewReader(getBody), int64(len(getBody)), mclient.PutObjectOptions{})
 		r.NoError(err)
 
-		core := &mclient.Core{Client: proxyClient}
-		uploadID, err := core.NewMultipartUpload(ctx, bucket, multipartKey, mclient.PutObjectOptions{})
+		// Notesnook initiates/completes multipart uploads through its internal S3
+		// client while clients PUT parts to presigned URLs through Proxy.
+		multipartCore := &mclient.Core{Client: minioClient}
+		directUploadID, err := multipartCore.NewMultipartUpload(ctx, bucket, multipartKey, mclient.PutObjectOptions{})
 		r.NoError(err)
-		urls := getNotesnookPresignedURLs(t, "http://"+e.ProxyAddr, bucket, getKey, putKey, multipartKey, uploadID)
+		defer func() {
+			_ = multipartCore.AbortMultipartUpload(ctx, bucket, multipartKey, directUploadID)
+		}()
+		urls := getNotesnookPresignedURLs(t, "http://"+e.ProxyAddr, bucket, getKey, putKey, multipartKey, directUploadID)
 
 		getURL, err := url.Parse(urls.Get)
 		r.NoError(err)
+		r.Equal("AWS4-HMAC-SHA256", getURL.Query().Get("X-Amz-Algorithm"))
+		r.NotEmpty(getURL.Query().Get("X-Amz-Credential"))
+		r.Equal("host", getURL.Query().Get("X-Amz-SignedHeaders"))
 		code, _, body := doRequest(t, http.MethodGet, getURL, "")
 		r.Equal(http.StatusOK, code, body)
 		r.Equal(getBody, body)
 
 		putURL, err := url.Parse(urls.Put)
 		r.NoError(err)
-		code, _, body = doRequest(t, http.MethodPut, putURL, "presigned PUT from Notesnook signer")
+		r.Equal("AWS4-HMAC-SHA256", putURL.Query().Get("X-Amz-Algorithm"))
+		r.NotEmpty(putURL.Query().Get("X-Amz-Credential"))
+		r.Equal("host", putURL.Query().Get("X-Amz-SignedHeaders"))
+		putBody := "presigned PUT from Notesnook signer"
+		code, _, body = doRequestWithHeaders(t, http.MethodPut, putURL, putBody, http.Header{"Content-Type": {""}})
 		r.Equal(http.StatusOK, code, body)
-		r.Equal("presigned PUT from Notesnook signer", string(readObject(t, minioClient, bucket, putKey)))
+		r.Equal(putBody, string(readObject(t, minioClient, bucket, putKey)))
 
 		partURL, err := url.Parse(urls.UploadPart)
 		r.NoError(err)
-		code, headers, body := doRequest(t, http.MethodPut, partURL, "Notesnook multipart part")
+		r.Equal("AWS4-HMAC-SHA256", partURL.Query().Get("X-Amz-Algorithm"))
+		r.NotEmpty(partURL.Query().Get("X-Amz-Credential"))
+		r.Equal("host", partURL.Query().Get("X-Amz-SignedHeaders"))
+		partBody := strings.Repeat("m", 6*1024*1024)
+		code, headers, body := doRequestWithHeaders(t, http.MethodPut, partURL, partBody, http.Header{"Content-Type": {""}})
 		r.Equal(http.StatusOK, code, body)
 		r.NotEmpty(headers.Get("ETag"))
-		r.NoError(core.AbortMultipartUpload(ctx, bucket, multipartKey, uploadID))
+		_, err = multipartCore.CompleteMultipartUpload(ctx, bucket, multipartKey, directUploadID, []mclient.CompletePart{{PartNumber: 1, ETag: strings.Trim(headers.Get("ETag"), `"`)}}, mclient.PutObjectOptions{})
+		r.NoError(err)
+		r.Equal(partBody, string(readObject(t, minioClient, bucket, multipartKey)))
 	})
 
 	t.Run("presigned_head", func(t *testing.T) {

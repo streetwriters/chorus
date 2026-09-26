@@ -2,6 +2,7 @@ package s3client
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -48,6 +49,14 @@ func TestProcessHeaders(t *testing.T) {
 			},
 			wantToSign:  []string{"Content-Type"},
 			wantDropped: []string{"Authorization"},
+		},
+		{
+			name: "empty content type is omitted from the backend request",
+			origin: http.Header{
+				"Authorization": {authHostOnly},
+				"Content-Type":  {""},
+			},
+			wantDropped: []string{"Authorization", "Content-Type"},
 		},
 		{
 			name: "unsigned non amz headers are forwarded unsigned",
@@ -113,4 +122,24 @@ func TestProcessHeaders(t *testing.T) {
 			r.Len(notToSign, len(tc.wantNotToSign))
 		})
 	}
+}
+
+func TestHTTPClientEmitsExplicitEmptyContentType(t *testing.T) {
+	t.Parallel()
+
+	seen := make(chan []string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen <- r.Header["Content-Type"]
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	req, err := http.NewRequest(http.MethodPut, server.URL, nil)
+	require.NoError(t, err)
+	req.Header["Content-Type"] = []string{""}
+	resp, err := server.Client().Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	require.Equal(t, []string{""}, <-seen)
 }

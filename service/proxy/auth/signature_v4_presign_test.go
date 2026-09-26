@@ -87,6 +87,31 @@ func presignWithQueryPayloadHash(t *testing.T, req *http.Request, hashedPayload 
 	return req
 }
 
+func presignWithEmptySignedContentType(t *testing.T) *http.Request {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPut, "/bucket-test/object.png", nil)
+	req.Host = "s3.example.com:9669"
+	req.Header["Content-Type"] = []string{""}
+	now := time.Now().UTC()
+	scope := strings.Join([]string{now.Format("20060102"), "us-east-1", "s3", "aws4_request"}, "/")
+	query := req.URL.Query()
+	query.Set(s3.AmzAlgorithm, "AWS4-HMAC-SHA256")
+	query.Set(s3.AmzCredential, presignTestAccessKey+"/"+scope)
+	query.Set(s3.AmzDate, now.Format("20060102T150405Z"))
+	query.Set(s3.AmzExpires, "3600")
+	query.Set(s3.AmzSignedHeaders, "content-type;host")
+	req.URL.RawQuery = query.Encode()
+	signedHeaders := http.Header{
+		"Content-Type": {""},
+		"Host":         {req.Host},
+	}
+	canonicalRequest := getCanonicalV4Request(signedHeaders, unsignedPayload, req.URL.RawQuery, req.URL.Path, req.Method)
+	signingKey := getV4SigningKey(presignTestSecretKey, now, "us-east-1")
+	query.Set(s3.AmzSignature, getV4Signature(signingKey, getV4StringToSign(canonicalRequest, now, scope)))
+	req.URL.RawQuery = query.Encode()
+	return req
+}
+
 // signWithoutPayloadHash signs req with the Authorization header while
 // omitting X-Amz-Content-Sha256, hashing the payload as sha256("") - the value
 // the verification assumes for such a request. minio-go's signer instead signs
@@ -121,6 +146,30 @@ func TestDoesPresignedSignatureV4Match(t *testing.T) {
 		got, _, err := m.doesPresignedSignatureV4Match(req)
 		require.NoError(t, err)
 		require.Equal(t, presignTestUser, got)
+	})
+
+	t.Run("empty unsigned content type is ignored", func(t *testing.T) {
+		t.Parallel()
+		req := presignTestRequest(t, "us-east-1", 3600)
+		req.Header["Content-Type"] = []string{""}
+		require.Equal(t, "host", req.URL.Query().Get(s3.AmzSignedHeaders))
+
+		got, _, err := presignTestMiddleware().doesPresignedSignatureV4Match(req)
+		require.NoError(t, err)
+		require.Equal(t, presignTestUser, got)
+	})
+
+	t.Run("empty signed content type is still verified", func(t *testing.T) {
+		t.Parallel()
+		req := presignWithEmptySignedContentType(t)
+		_, _, err := presignTestMiddleware().doesPresignedSignatureV4Match(req)
+		require.NoError(t, err)
+
+		req.Header.Set("Content-Type", "application/octet-stream")
+		_, _, err = presignTestMiddleware().doesPresignedSignatureV4Match(req)
+		var s3Err mclient.ErrorResponse
+		require.ErrorAs(t, err, &s3Err)
+		require.Equal(t, "SignatureDoesNotMatch", s3Err.Code)
 	})
 
 	t.Run("non-default region in credential scope", func(t *testing.T) {

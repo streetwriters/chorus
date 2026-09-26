@@ -198,6 +198,13 @@ func validateSignedHeaders(signedHeaders []string, reqHeaders http.Header) error
 	}
 	for header := range reqHeaders {
 		lower := strings.ToLower(header)
+		if lower == "content-type" && !slices.Contains(signedHeaders, lower) && hasOnlyEmptyHeaderValues(reqHeaders[http.CanonicalHeaderKey(header)]) {
+			// Some S3 clients send an empty Content-Type on uploads even when
+			// the presigned request does not sign it. An empty value carries no
+			// metadata, so treat it as absent while still validating every
+			// header the signer explicitly included in SignedHeaders.
+			continue
+		}
 		if !requiresSignature(lower) {
 			continue
 		}
@@ -206,6 +213,15 @@ func validateSignedHeaders(signedHeaders []string, reqHeaders http.Header) error
 		}
 	}
 	return nil
+}
+
+func hasOnlyEmptyHeaderValues(values []string) bool {
+	for _, value := range values {
+		if value != "" {
+			return false
+		}
+	}
+	return true
 }
 
 // ExtractSignedHeaders extract signed headers from Authorization header
